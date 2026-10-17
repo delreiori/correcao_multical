@@ -1,0 +1,189 @@
+import { AutocabRequestError } from './autocab.ts';
+import type { AutocabGateway } from './autocab.ts';
+import type { AuditStore } from './audit-store.ts';
+import { chooseTargetZone, findOutsideZone, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
+import type { ZoneRules } from './rules.ts';
+import type { FleetSnapshot, OperatingMode, PlannedChange, VehicleStatus } from '../shared/types.ts';
+export interface CorrectionConnection {
+    id: string;
+    name: string;
+    companyId?: number;
+    companyName?: string;
+    gateway: AutocabGateway | null;
+}
+// Resolve o companyId pelo nome da empresa no GET de empresas. Nunca segue sem empresa definida:
+// isso corrigiria veículos de todas as empresas da chave.
+export async function resolveCompanyId(connection: CorrectionConnection, gateway: AutocabGateway): Promise<number | undefined> {
+    if (connection.companyId !== undefined || connection.companyName === undefined)
+        return connection.companyId;
+    const companies = await gateway.listCompanies();
+    const matchingCompanies = companies.filter(company => company.name !== null && normalizeZoneName(company.name) === normalizeZoneName(connection.companyName!));
+    if (matchingCompanies.length !== 1) {
+        const available = companies.map(company => `${company.id}${company.name ? ' ' + company.name : ''}`).join(', ') || 'nenhuma';
+        throw new Error(`Empresa "${connection.companyName}" ${matchingCompanies.length ? 'ambígua' : 'não encontrada'} no GET de empresas; configure o companyId. Disponíveis: ${available}`);
+    }
+    return matchingCompanies[0].id;
+}
+function safeErrorMessage(error: unknown) { return error instanceof Error ? error.message : 'Falha não identificada na correção'; }
+export class CorrectionService {
+    private repository: AuditStore;
+    private rules: ZoneRules;
+    private mode: OperatingMode;
+    private deadline = Infinity;
+    private deferred = false;
+    private inspectedCount = 0;
+    private resolvedCompanyIds = new Map<string, number>();
+    constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode) { this.repository = repository; this.rules = rules; this.mode = mode; }
+    private async loadSnapshot(gateway: AutocabGateway): Promise<FleetSnapshot> {
+        const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
+        if (new Set(zones.map(zone => zone.id)).size !== zones.length)
+            throw new Error('IDs de zonas duplicados na mesma conexão');
+        if (new Set(statuses.map(status => status.vehicleId)).size !== statuses.length)
+            throw new Error('IDs de veículos duplicados nos statuses');
+        return { zones, vehicles, statuses, gpsPositions };
+    }
+    private async reconcileUnresolvedChanges(connectionId: string, statuses: VehicleStatus[]) {
+        for (const change of await this.repository.listUnresolvedChanges(connectionId)) {
+            const currentStatus = statuses.find(status => status.vehicleId === change.vehicleId);
+            if (currentStatus?.zoneId === change.targetZoneId)
+                await this.repository.finishChange(change.id, 'confirmed', change.httpStatus, 'Zona de destino confirmada em consulta posterior; posição na fila pode ter avançado.');
+        }
+    }
+    private async planChanges(connection: CorrectionConnection, snapshot: FleetSnapshot, gateway: AutocabGateway): Promise<PlannedChange[]> {
+        const blockedChanges = await this.repository.listUnresolvedChanges(connection.id);
+        const blockedVehicles = new Set(blockedChanges.map(change => change.vehicleId));
+        const reservedQueuePositions = new Map<number, number>();
+        for (const change of blockedChanges)
+            reservedQueuePositions.set(change.targetZoneId, Math.max(reservedQueuePositions.get(change.targetZoneId) ?? 0, change.position));
+        const plannedChanges: PlannedChange[] = [];
+        const cursor = await this.repository.getVehicleCursor?.(connection.id) ?? -1;
+        const orderedStatuses = [...snapshot.statuses].sort((left, right) => left.vehicleId - right.vehicleId);
+        const statusesAfterCursor = orderedStatuses.filter(status => status.vehicleId > cursor);
+        const statusesBeforeCursor = orderedStatuses.filter(status => status.vehicleId <= cursor);
+        const statusesToInspect = [...statusesAfterCursor, ...statusesBeforeCursor];
+        for (const status of statusesToInspect) {
+            if (Date.now() > this.deadline - 15000) {
+                this.deferred = true;
+                break;
+            }
+            this.inspectedCount++;
+            await this.repository.saveVehicleCursor?.(connection.id, status.vehicleId);
+            if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
+                continue;
+            const vehicle = snapshot.vehicles.find(vehicle => vehicle.id === status.vehicleId);
+            if (!vehicle)
+                continue;
+            if (connection.companyId !== undefined) {
+                if (vehicle.companyId === null)
+                    throw new Error('Não é possível filtrar empresa: veículo sem companyId');
+                if (vehicle.companyId !== connection.companyId)
+                    continue;
+            }
+            const companyId = connection.companyId ?? vehicle.companyId ?? undefined;
+            const companyIds = new Set(snapshot.zones.map(zone => zone.companyId).filter(companyId => companyId !== null));
+            if (companyId === undefined && companyIds.size > 1)
+                throw new Error('Várias empresas nas zonas, mas veículo sem companyId; configure uma conexão por empresa');
+            const companyZones = snapshot.zones.filter(zone => zone.companyId === null || companyId === undefined || zone.companyId === companyId);
+            const currentZone = companyZones.find(zone => zone.id === status.zoneId);
+            if (!currentZone)
+                continue;
+            const outsideZone = findOutsideZone(companyZones, this.rules);
+            const gpsPosition = snapshot.gpsPositions.find(position => position.vehicleId === status.vehicleId);
+            let gpsZoneId: number | null = null;
+            if (!isBusy(status) && gpsPosition)
+                gpsZoneId = await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, companyId);
+            const gpsZone = companyZones.find(zone => zone.id === gpsZoneId) ?? null;
+            const targetZone = chooseTargetZone(status, currentZone, gpsZone, outsideZone, this.rules);
+            if (!targetZone)
+                continue;
+            const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
+            reservedQueuePositions.set(targetZone.id, queueTail + 1);
+            plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1));
+        }
+        return plannedChanges;
+    }
+    private async verifyChange(gateway: AutocabGateway, change: PlannedChange, changeId: string, httpStatus: number) {
+        const latestStatus = (await gateway.listVehicleStatuses()).find(status => status.vehicleId === change.vehicleId);
+        const isConfirmed = latestStatus?.zoneId === change.targetZoneId;
+        await this.repository.finishChange(changeId, isConfirmed ? 'confirmed' : 'unconfirmed', httpStatus, isConfirmed ? 'Zona confirmada após envio; posição enviada registrada no histórico.' : 'POST aceito; zona ainda não confirmada. Veículo bloqueado para nova tentativa automática.');
+    }
+    private async recordSendFailure(changeId: string, error: unknown) {
+        const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+        const isDefiniteRejection = httpStatus !== null && httpStatus >= 400 && httpStatus < 500;
+        await this.repository.finishChange(changeId, isDefiniteRejection ? 'failed' : 'unknown', httpStatus, isDefiniteRejection ? `Autocab rejeitou a alteração: HTTP ${httpStatus}.` : 'Resultado incerto. Veículo bloqueado até uma consulta confirmar o destino.');
+    }
+    private async executeChange(connection: CorrectionConnection, cycleId: string, change: PlannedChange, gateway: AutocabGateway, reservedPositions: Map<number, number>) {
+        if (this.mode === 'dry') {
+            const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'planned');
+            await this.repository.finishChange(changeId, 'planned', null, 'Simulação com dados reais; nenhum POST enviado.');
+            return;
+        }
+        const latestStatuses = await gateway.listVehicleStatuses();
+        const latestStatus = latestStatuses.find(status => status.vehicleId === change.vehicleId);
+        const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason === 'busy-outside') : true;
+        if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
+            const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'skipped');
+            await this.repository.finishChange(changeId, 'skipped', null, 'Estado do veículo mudou entre planejamento e envio.');
+            return;
+        }
+        change.position = Math.max(change.position, calculateQueueTail(latestStatuses, change.targetZoneId) + 1, (reservedPositions.get(change.targetZoneId) ?? 0) + 1);
+        reservedPositions.set(change.targetZoneId, change.position);
+        const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'pending');
+        try {
+            const httpStatus = await gateway.applyVehiclePlot(change.vehicleId, change.targetZoneId, change.position);
+            try {
+                await this.verifyChange(gateway, change, changeId, httpStatus);
+            }
+            catch {
+                await this.repository.finishChange(changeId, 'unconfirmed', httpStatus, 'POST aceito; consulta de confirmação falhou. Não repetir automaticamente.');
+            }
+        }
+        catch (error) {
+            await this.recordSendFailure(changeId, error);
+        }
+    }
+    async runConnection(connection: CorrectionConnection, options: {
+        deadline?: number;
+    } = {}) {
+        this.deadline = options.deadline ?? Infinity;
+        this.deferred = false;
+        this.inspectedCount = 0;
+        const cycleId = await this.repository.startCycle(connection.id, this.mode);
+        let inspected = 0, planned = 0;
+        try {
+            if (!connection.gateway)
+                throw new Error('Subscription Key ausente nesta conexão');
+            const gateway = connection.gateway;
+            if (connection.companyId === undefined && connection.companyName !== undefined) {
+                const companyId = this.resolvedCompanyIds.get(connection.id) ?? await resolveCompanyId(connection, gateway);
+                if (companyId !== undefined)
+                    this.resolvedCompanyIds.set(connection.id, companyId);
+                connection = { ...connection, companyId };
+            }
+            const snapshot = await this.loadSnapshot(gateway);
+            // Com várias empresas na mesma chave, cada conexão guarda e usa somente as zonas da sua empresa.
+            if (connection.companyId !== undefined)
+                snapshot.zones = snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId);
+            await this.repository.saveZones(connection.id, snapshot.zones);
+            if (this.mode === 'live')
+                await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
+            const changes = await this.planChanges(connection, snapshot, gateway);
+            planned = changes.length;
+            inspected = this.inspectedCount;
+            // Envio sequencial mantém a ordem dos veículos destinados à mesma fila.
+            const reservedPositions = new Map<number, number>();
+            for (const change of changes) {
+                if (Date.now() > this.deadline - 15000) {
+                    this.deferred = true;
+                    await this.repository.saveVehicleCursor?.(connection.id, change.vehicleId - 1);
+                    break;
+                }
+                await this.executeChange(connection, cycleId, change, gateway, reservedPositions);
+            }
+            await this.repository.finishCycle(cycleId, this.deferred ? 'partial' : 'completed', inspected, planned, this.deferred ? 'Tempo do ciclo esgotado; veículos restantes serão retomados no próximo ciclo.' : null);
+        }
+        catch (error) {
+            await this.repository.finishCycle(cycleId, 'failed', this.inspectedCount, planned, safeErrorMessage(error));
+        }
+    }
+}

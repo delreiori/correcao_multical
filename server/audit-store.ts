@@ -1,0 +1,14 @@
+import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, Zone, DashboardData } from '../shared/types.ts';
+type Awaitable<Value> = Value | Promise<Value>;
+export interface AuditStore {
+    recoverInterruptedCycles(): Awaitable<void>;
+    startCycle(connectionId: string, mode: OperatingMode): Awaitable<string>;
+    finishCycle(cycleId: string, outcome: string, inspected: number, planned: number, detail?: string | null): Awaitable<void>;
+    createChange(connectionId: string, cycleId: string, mode: OperatingMode, change: PlannedChange, outcome: ChangeOutcome): Awaitable<string>;
+    finishChange(changeId: string, outcome: ChangeOutcome, httpStatus?: number | null, detail?: string | null): Awaitable<void>;
+    listUnresolvedChanges(connectionId: string): Awaitable<ChangeLog[]>;
+    saveZones(connectionId: string, zones: Zone[]): Awaitable<void>;
+    getDashboard(connectionId?: string | null): Awaitable<DashboardData>;
+    getVehicleCursor?(connectionId: string): Promise<number>;
+    saveVehicleCursor?(connectionId: string, vehicleId: number): Promise<void>;
+}

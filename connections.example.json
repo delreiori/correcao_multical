@@ -1,0 +1,5 @@
+[
+  {"id":"arcoverde","name":"Arcoverde","subscriptionKeyEnvironmentVariable":"AUTOCAB_SUBSCRIPTION_KEY","companyName":"Arcoverde"},
+  {"id":"sao-conrado","name":"São Conrado","subscriptionKeyEnvironmentVariable":"AUTOCAB_SUBSCRIPTION_KEY","companyName":"São Conrado"},
+  {"id":"pedra-da-gavea","name":"Pedra da Gávea","subscriptionKeyEnvironmentVariable":"AUTOCAB_SUBSCRIPTION_KEY","companyName":"Pedra da Gávea"}
+]
