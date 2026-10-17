@@ -750,7 +750,9 @@ function createServerlessHandler(loadRuntime2) {
     const isCron = path === "/api/cron";
     const expectedToken = isCron ? process.env.CRON_SECRET : process.env.PANEL_TOKEN;
     if (!expectedToken) {
-      sendJson(response, 503, { error: `Configure ${isCron ? "CRON_SECRET" : "PANEL_TOKEN"} na Vercel e fa\xE7a Redeploy.` });
+      const message = `Configure ${isCron ? "CRON_SECRET" : "PANEL_TOKEN"} na Vercel e fa\xE7a Redeploy.`;
+      console.error(message);
+      sendJson(response, 503, { error: message });
       return;
     }
     if (!hasBearerToken(request, expectedToken)) {
@@ -767,8 +769,16 @@ function createServerlessHandler(loadRuntime2) {
       sendJson(response, 404, { error: "Rota n\xE3o encontrada" });
       return;
     }
+    let runtime;
     try {
-      const runtime = await loadRuntime2();
+      runtime = await loadRuntime2();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Falha ao iniciar o backend";
+      console.error(`Backend n\xE3o iniciou: ${message}`);
+      sendJson(response, 503, { error: `${message}. Confira as vari\xE1veis da Vercel e fa\xE7a Redeploy.` });
+      return;
+    }
+    try {
       if (path === "/api/status") {
         sendJson(response, 200, { mode: runtime.configuration.mode, running: runtime.runner.running, autoStart: false, intervalMs: runtime.configuration.intervalMs, execution: "serverless", connections: runtime.connections.map((connection) => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) });
         return;
@@ -792,6 +802,7 @@ function createServerlessHandler(loadRuntime2) {
         sendJson(response, 409, { error: "Ciclo j\xE1 em andamento em outra execu\xE7\xE3o" });
         return;
       }
+      console.error("Falha ao executar a rota no backend");
       sendJson(response, 503, { error: "Falha ao acessar o backend. Confira DATABASE_URL e as configura\xE7\xF5es da Vercel." });
     }
   };

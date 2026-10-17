@@ -32,7 +32,9 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
         const isCron = path === '/api/cron';
         const expectedToken = isCron ? process.env.CRON_SECRET : process.env.PANEL_TOKEN;
         if (!expectedToken) {
-            sendJson(response, 503, { error: `Configure ${isCron ? 'CRON_SECRET' : 'PANEL_TOKEN'} na Vercel e faça Redeploy.` });
+            const message = `Configure ${isCron ? 'CRON_SECRET' : 'PANEL_TOKEN'} na Vercel e faça Redeploy.`;
+            console.error(message);
+            sendJson(response, 503, { error: message });
             return;
         }
         if (!hasBearerToken(request, expectedToken)) {
@@ -49,8 +51,18 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
             sendJson(response, 404, { error: 'Rota não encontrada' });
             return;
         }
+        let runtime: NeonRuntime;
         try {
-            const runtime = await loadRuntime();
+            runtime = await loadRuntime();
+        }
+        catch (error) {
+            // Mensagens de configuração são próprias (sem credenciais); mostram qual variável falta.
+            const message = error instanceof Error ? error.message : 'Falha ao iniciar o backend';
+            console.error(`Backend não iniciou: ${message}`);
+            sendJson(response, 503, { error: `${message}. Confira as variáveis da Vercel e faça Redeploy.` });
+            return;
+        }
+        try {
             if (path === '/api/status') {
                 sendJson(response, 200, { mode: runtime.configuration.mode, running: runtime.runner.running, autoStart: false, intervalMs: runtime.configuration.intervalMs, execution: 'serverless', connections: runtime.connections.map(connection => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) });
                 return;
@@ -76,6 +88,7 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
                 sendJson(response, 409, { error: 'Ciclo já em andamento em outra execução' });
                 return;
             }
+            console.error('Falha ao executar a rota no backend');
             sendJson(response, 503, { error: 'Falha ao acessar o backend. Confira DATABASE_URL e as configurações da Vercel.' });
         }
     };
