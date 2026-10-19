@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { createNeonRuntime, CycleAlreadyRunningError } from './neon-runtime.ts';
 import { listCompaniesForConnections } from './companies.ts';
+import { CRON_PASS_WINDOW_MS, readCronRepeatIntervalMs } from './execution-limits.ts';
 export type NeonRuntime = Awaited<ReturnType<typeof createNeonRuntime>>;
 function hasBearerToken(request: IncomingMessage, token: string) {
     if (!token)
@@ -80,7 +81,17 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
                 sendJson(response, 200, await runtime.repository.getDashboard(query.get('connectionId')));
                 return;
             }
+            const startedAt = Date.now();
             await runtime.runner.runOnce();
+            if (isCron) {
+                // Passadas extras corrigem mais rápido que o intervalo mínimo do cron; só repete
+                // quando a passada anterior terminou todas as empresas e ainda cabe outra no minuto.
+                const repeatIntervalMs = readCronRepeatIntervalMs();
+                while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs < CRON_PASS_WINDOW_MS) {
+                    await new Promise(resolve => setTimeout(resolve, repeatIntervalMs));
+                    await runtime.runner.runOnce();
+                }
+            }
             sendJson(response, 200, { completed: true, note: 'Consulte o histórico de ciclos para resultados e lotes pendentes.' });
         }
         catch (error) {

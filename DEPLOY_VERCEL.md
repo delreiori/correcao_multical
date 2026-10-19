@@ -16,6 +16,7 @@ Em Settings → Environment Variables configure para Production:
 | `AUTOCAB_COMPANIES_PATH` | Opcional: caminho do GET de empresas (padrão `/booking/v1/companies`) |
 | `PANEL_TOKEN` | Token aleatório próprio para proteger os logs e entrar no painel |
 | `CRON_SECRET` | Outro token aleatório, exclusivo do agendador |
+| `CRON_REPEAT_INTERVAL_MS` | Opcional: intervalo das passadas extras dentro de cada cron (padrão 20000; 0 desliga) |
 | `AUTOCAB_MODE` | `dry` para validar consultas e planos sem mover veículos |
 
 Crie os tokens em um gerenciador de senhas ou com `openssl rand -hex 32` na sua máquina. Não coloque valores em arquivos versionados, mensagens ou URLs. Digite somente PANEL_TOKEN no campo de senha do painel. A chave Autocab e a conexão Neon ficam no backend. O `.env` local não substitui as variáveis da Vercel.
@@ -39,6 +40,8 @@ O projeto está configurado para o plano **Vercel Pro** informado: `vercel.json`
 Não é necessário um agendador externo. Se trocar para Hobby, ajuste a frequência conforme os limites do plano ou use um agendador externo com HTTPS e header Authorization. Não configure dois agendadores para a mesma frota.
 
 Cada execução percorre as três empresas e, em cada uma, todos os veículos daquela empresa retornados pelo endpoint de status, sem limite fixo de quantidade. O orçamento do ciclo é de 270 segundos. Somente se esse tempo for atingido, o cursor persistido no Neon permite continuar no próximo ciclo, identificado como Lote parcial. Veículos ausentes da resposta Autocab ou sem dados necessários não podem ser corrigidos. As conexões também são alternadas quando o orçamento não comporta todas. CYCLE_INTERVAL_MS controla o servidor local; não configura o cron da Vercel.
+
+O cron da Vercel dispara no máximo uma vez por minuto. Para corrigir mais rápido, cada chamada faz novas passadas a cada `CRON_REPEAT_INTERVAL_MS` (padrão 20 s) por até 45 s, somente quando a passada anterior terminou todas as empresas. A leitura da frota (zonas, veículos, status e GPS) é feita uma vez por passada e compartilhada entre as empresas; as consultas de zona por GPS rodam 8 em paralelo; em live, os status são relidos uma vez antes dos envios e uma vez depois para confirmar o lote.
 
 Um lease compartilhado de 360 segundos impede execução concorrente entre instâncias; a função tem duração máxima de 300 segundos. O cron continua sendo disparado a cada minuto; se o ciclo anterior ainda estiver ativo, o novo não começa. HTTP 409 indica que outra execução está ativa. Depois de um encerramento abrupto, os registros pendentes são recuperados pelo próximo ciclo após a expiração do lease. Erros de consulta/envio ficam registrados. A resposta HTTP completed indica que a execução terminou; consulte o resultado de cada ciclo.
 

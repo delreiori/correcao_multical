@@ -29,6 +29,8 @@ export async function resolveCompanyId(connection: CorrectionConnection, gateway
     }
     return matchingCompanies[0].id;
 }
+// Consultas simultâneas de zona por GPS; mantém a carga na Autocab limitada.
+const GPS_LOOKUP_CONCURRENCY = 8;
 function safeErrorMessage(error: unknown) { return error instanceof Error ? error.message : 'Falha não identificada na correção'; }
 export class CorrectionService {
     private repository: AuditStore;
@@ -80,58 +82,78 @@ export class CorrectionService {
         const outsideZoneMissing = companyId !== undefined && this.rules.outsideZoneName !== '' && findOutsideZone(snapshot.zones, this.rules) === null;
         if (outsideZoneMissing)
             this.notes.push(`zona ${this.rules.outsideZoneName} não existe nesta empresa; ocupados não são movidos`);
-        for (const status of statusesToInspect) {
+        const zoneCompanyIds = new Set(snapshot.zones.map(zone => zone.companyId).filter(zoneCompanyId => zoneCompanyId !== null));
+        const gpsByVehicle = new Map(snapshot.gpsPositions.map(position => [position.vehicleId, position]));
+        for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
             if (Date.now() > this.deadline - 15000) {
                 this.deferred = true;
                 break;
             }
-            this.inspectedCount++;
-            await this.repository.saveVehicleCursor?.(connection.id, status.vehicleId);
-            if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
-                continue;
-            const vehicle = vehiclesById.get(status.vehicleId);
-            if (!vehicle)
-                continue;
-            const vehicleCompanyId = companyId ?? vehicle.companyId ?? undefined;
-            const companyIds = new Set(snapshot.zones.map(zone => zone.companyId).filter(zoneCompanyId => zoneCompanyId !== null));
-            if (vehicleCompanyId === undefined && companyIds.size > 1)
-                throw new Error('Várias empresas nas zonas, mas veículo sem companyId; configure uma conexão por empresa');
-            const companyZones = snapshot.zones.filter(zone => zone.companyId === null || vehicleCompanyId === undefined || zone.companyId === vehicleCompanyId);
-            const currentZone = companyZones.find(zone => zone.id === status.zoneId);
-            if (!currentZone)
-                continue;
-            const outsideZone = findOutsideZone(companyZones, this.rules);
-            const gpsPosition = snapshot.gpsPositions.find(position => position.vehicleId === status.vehicleId);
-            let gpsZoneId: number | null = null;
-            if (!isBusy(status) && gpsPosition)
-                gpsZoneId = await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId);
-            const gpsZone = companyZones.find(zone => zone.id === gpsZoneId) ?? null;
-            const targetZone = chooseTargetZone(status, currentZone, gpsZone, outsideZone, this.rules);
-            if (!targetZone)
-                continue;
-            const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
-            reservedQueuePositions.set(targetZone.id, queueTail + 1);
-            plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1));
+            const chunk = statusesToInspect.slice(start, start + GPS_LOOKUP_CONCURRENCY);
+            // Consultas de zona por GPS do lote em paralelo; a decisão segue a ordem dos veículos.
+            const candidates = await Promise.all(chunk.map(async status => {
+                if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
+                    return null;
+                const vehicle = vehiclesById.get(status.vehicleId);
+                if (!vehicle)
+                    return null;
+                const vehicleCompanyId = companyId ?? vehicle.companyId ?? undefined;
+                if (vehicleCompanyId === undefined && zoneCompanyIds.size > 1)
+                    throw new Error('Várias empresas nas zonas, mas veículo sem companyId; configure uma conexão por empresa');
+                const companyZones = snapshot.zones.filter(zone => zone.companyId === null || vehicleCompanyId === undefined || zone.companyId === vehicleCompanyId);
+                const currentZone = companyZones.find(zone => zone.id === status.zoneId);
+                if (!currentZone)
+                    return null;
+                const gpsPosition = gpsByVehicle.get(status.vehicleId);
+                const gpsZoneId = !isBusy(status) && gpsPosition ? await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+                return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
+            }));
+            for (const candidate of candidates) {
+                if (!candidate)
+                    continue;
+                const { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId } = candidate;
+                const gpsZone = companyZones.find(zone => zone.id === gpsZoneId) ?? null;
+                const targetZone = chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, this.rules), this.rules);
+                if (!targetZone)
+                    continue;
+                const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
+                reservedQueuePositions.set(targetZone.id, queueTail + 1);
+                plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1));
+            }
+            this.inspectedCount += chunk.length;
+            await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
         }
         return plannedChanges;
     }
-    private async verifyChange(gateway: AutocabGateway, change: PlannedChange, changeId: string, httpStatus: number) {
-        const latestStatus = (await gateway.listVehicleStatuses()).find(status => status.vehicleId === change.vehicleId);
-        const isConfirmed = latestStatus?.zoneId === change.targetZoneId;
-        await this.repository.finishChange(changeId, isConfirmed ? 'confirmed' : 'unconfirmed', httpStatus, isConfirmed ? 'Zona confirmada após envio; posição enviada registrada no histórico.' : 'POST aceito; zona ainda não confirmada. Veículo bloqueado para nova tentativa automática.');
+    // Uma consulta de status confirma todos os envios do lote.
+    private async verifySentChanges(gateway: AutocabGateway, sentChanges: { change: PlannedChange; changeId: string; httpStatus: number }[]) {
+        if (sentChanges.length === 0)
+            return;
+        let latestStatuses: Map<number, VehicleStatus>;
+        try {
+            latestStatuses = new Map((await gateway.listVehicleStatuses()).map(status => [status.vehicleId, status]));
+        }
+        catch {
+            for (const { changeId, httpStatus } of sentChanges)
+                await this.repository.finishChange(changeId, 'unconfirmed', httpStatus, 'POST aceito; consulta de confirmação falhou. Não repetir automaticamente.');
+            return;
+        }
+        for (const { change, changeId, httpStatus } of sentChanges) {
+            const isConfirmed = latestStatuses.get(change.vehicleId)?.zoneId === change.targetZoneId;
+            await this.repository.finishChange(changeId, isConfirmed ? 'confirmed' : 'unconfirmed', httpStatus, isConfirmed ? 'Zona confirmada após envio; posição enviada registrada no histórico.' : 'POST aceito; zona ainda não confirmada. Veículo bloqueado para nova tentativa automática.');
+        }
     }
     private async recordSendFailure(changeId: string, error: unknown) {
         const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
         const isDefiniteRejection = httpStatus !== null && httpStatus >= 400 && httpStatus < 500;
         await this.repository.finishChange(changeId, isDefiniteRejection ? 'failed' : 'unknown', httpStatus, isDefiniteRejection ? `Autocab rejeitou a alteração: HTTP ${httpStatus}.` : 'Resultado incerto. Veículo bloqueado até uma consulta confirmar o destino.');
     }
-    private async executeChange(connection: CorrectionConnection, cycleId: string, change: PlannedChange, gateway: AutocabGateway, reservedPositions: Map<number, number>) {
+    private async executeChange(connection: CorrectionConnection, cycleId: string, change: PlannedChange, gateway: AutocabGateway, latestStatuses: VehicleStatus[], reservedPositions: Map<number, number>, sentChanges: { change: PlannedChange; changeId: string; httpStatus: number }[]) {
         if (this.mode === 'dry') {
             const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'planned');
             await this.repository.finishChange(changeId, 'planned', null, 'Simulação com dados reais; nenhum POST enviado.');
             return;
         }
-        const latestStatuses = await gateway.listVehicleStatuses();
         const latestStatus = latestStatuses.find(status => status.vehicleId === change.vehicleId);
         const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason === 'busy-outside') : true;
         if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
@@ -144,12 +166,7 @@ export class CorrectionService {
         const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'pending');
         try {
             const httpStatus = await gateway.applyVehiclePlot(change.vehicleId, change.targetZoneId, change.position);
-            try {
-                await this.verifyChange(gateway, change, changeId, httpStatus);
-            }
-            catch {
-                await this.repository.finishChange(changeId, 'unconfirmed', httpStatus, 'POST aceito; consulta de confirmação falhou. Não repetir automaticamente.');
-            }
+            sentChanges.push({ change, changeId, httpStatus });
         }
         catch (error) {
             await this.recordSendFailure(changeId, error);
@@ -157,7 +174,8 @@ export class CorrectionService {
     }
     async runConnection(connection: CorrectionConnection, options: {
         deadline?: number;
-    } = {}) {
+        snapshotCache?: Map<AutocabGateway, Promise<FleetSnapshot>>;
+    } = {}): Promise<string> {
         this.deadline = options.deadline ?? Infinity;
         this.deferred = false;
         this.inspectedCount = 0;
@@ -174,32 +192,50 @@ export class CorrectionService {
                     this.resolvedCompanyIds.set(connection.id, companyId);
                 connection = { ...connection, companyId };
             }
-            const snapshot = await this.loadSnapshot(gateway);
+            // As empresas da mesma chave reaproveitam a leitura da frota feita no ciclo.
+            let snapshotPromise = options.snapshotCache?.get(gateway);
+            if (!snapshotPromise) {
+                snapshotPromise = this.loadSnapshot(gateway);
+                options.snapshotCache?.set(gateway, snapshotPromise);
+                snapshotPromise.catch(() => options.snapshotCache?.delete(gateway));
+            }
+            let snapshot = await snapshotPromise;
             // Com várias empresas na mesma chave, cada conexão guarda e usa somente as zonas da sua empresa.
             if (connection.companyId !== undefined)
-                snapshot.zones = snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId);
+                snapshot = { ...snapshot, zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
             await this.repository.saveZones(connection.id, snapshot.zones);
             if (this.mode === 'live')
                 await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
             const changes = await this.planChanges(connection, snapshot, gateway);
             planned = changes.length;
             inspected = this.inspectedCount;
-            // Envio sequencial mantém a ordem dos veículos destinados à mesma fila.
+            // Envio sequencial mantém a ordem dos veículos destinados à mesma fila. Os status são
+            // relidos uma vez antes do lote para cancelar veículos que mudaram desde o planejamento.
             const reservedPositions = new Map<number, number>();
-            for (const change of changes) {
-                if (Date.now() > this.deadline - 15000) {
-                    this.deferred = true;
-                    await this.repository.saveVehicleCursor?.(connection.id, change.vehicleId - 1);
-                    break;
+            const sentChanges: { change: PlannedChange; changeId: string; httpStatus: number }[] = [];
+            const latestStatuses = this.mode === 'live' && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
+            try {
+                for (const change of changes) {
+                    if (Date.now() > this.deadline - 15000) {
+                        this.deferred = true;
+                        await this.repository.saveVehicleCursor?.(connection.id, change.vehicleId - 1);
+                        break;
+                    }
+                    await this.executeChange(connection, cycleId, change, gateway, latestStatuses, reservedPositions, sentChanges);
                 }
-                await this.executeChange(connection, cycleId, change, gateway, reservedPositions);
+            }
+            finally {
+                await this.verifySentChanges(gateway, sentChanges);
             }
             if (this.deferred)
                 this.notes.push('Tempo do ciclo esgotado; veículos restantes serão retomados no próximo ciclo.');
-            await this.repository.finishCycle(cycleId, this.deferred ? 'partial' : 'completed', inspected, planned, this.notes.join('. ') || null);
+            const outcome = this.deferred ? 'partial' : 'completed';
+            await this.repository.finishCycle(cycleId, outcome, inspected, planned, this.notes.join('. ') || null);
+            return outcome;
         }
         catch (error) {
             await this.repository.finishCycle(cycleId, 'failed', this.inspectedCount, planned, safeErrorMessage(error));
+            return 'failed';
         }
     }
 }

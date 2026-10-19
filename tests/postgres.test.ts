@@ -113,7 +113,8 @@ test('limite de tempo preserva o cursor e retoma a frota no ciclo seguinte', asy
         await service.runConnection(connection, { deadline: currentTime + 30000 });
         const partialCycle = (await repository.getDashboard()).cycles[0];
         assert.equal(partialCycle.outcome, 'partial');
-        assert.equal(partialCycle.inspected, 1);
+        // O lote de consultas GPS roda em paralelo; o tempo esgota no envio e o cursor volta antes do veículo pendente.
+        assert.equal(partialCycle.inspected, 4);
         assert.equal(await repository.getVehicleCursor('main'), 100);
         await service.runConnection(connection);
         const dashboard = await repository.getDashboard();
@@ -141,6 +142,8 @@ test('handler Vercel aplica autenticação de painel/cron e interpreta rewrite',
     const previousPanelToken = process.env.PANEL_TOKEN, previousCronSecret = process.env.CRON_SECRET;
     process.env.PANEL_TOKEN = 'panel-test';
     process.env.CRON_SECRET = 'cron-test';
+    const previousRepeatInterval = process.env.CRON_REPEAT_INTERVAL_MS;
+    process.env.CRON_REPEAT_INTERVAL_MS = '0';
     const gateway = new DemoAutocabClient();
     const connections = [{ id: 'main', name: 'Main', gateway }];
     const configuration: AppConfig = { mode: 'dry', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', connections: [] };
@@ -176,6 +179,10 @@ test('handler Vercel aplica autenticação de painel/cron e interpreta rewrite',
             delete process.env.CRON_SECRET;
         else
             process.env.CRON_SECRET = previousCronSecret;
+        if (previousRepeatInterval === undefined)
+            delete process.env.CRON_REPEAT_INTERVAL_MS;
+        else
+            process.env.CRON_REPEAT_INTERVAL_MS = previousRepeatInterval;
         await new Promise<void>(resolve => server.close(() => resolve()));
         await database.close();
     }

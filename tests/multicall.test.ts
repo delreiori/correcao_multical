@@ -107,3 +107,23 @@ test('as três empresas rodam no mesmo ciclo e empresa sem FORA DE AREA ainda co
     assert.match(dashboard.cycles.find(cycle => cycle.connectionId === 'arcoverde')?.detail ?? '', /companyId 1: 1 veículos.*FORA DE AREA não existe/);
     await database.close();
 });
+test('intervalo de passadas extras do cron aceita 0 e usa 20 s como padrão', async () => {
+    const { readCronRepeatIntervalMs } = await import('../server/execution-limits.ts');
+    assert.equal(readCronRepeatIntervalMs(undefined), 20000);
+    assert.equal(readCronRepeatIntervalMs('0'), 0);
+    assert.equal(readCronRepeatIntervalMs('abc'), 20000);
+});
+test('as empresas da mesma chave reaproveitam uma única leitura da frota no ciclo', async () => {
+    const { gateway } = createMulticallGateway();
+    let statusReads = 0;
+    const listStatuses = gateway.listVehicleStatuses.bind(gateway);
+    gateway.listVehicleStatuses = async () => { statusReads++; return listStatuses(); };
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'dry');
+    const snapshotCache = new Map();
+    await service.runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, gateway }, { snapshotCache });
+    await service.runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 2, gateway }, { snapshotCache });
+    assert.equal(statusReads, 1);
+    assert.equal(repository.getDashboard().changes.length, 2);
+    repository.close();
+});

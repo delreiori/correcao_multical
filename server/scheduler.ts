@@ -9,8 +9,11 @@ export class CorrectionScheduler {
     private activeCycle: Promise<void> | null = null;
     constructor(service: CorrectionService, connections: CorrectionConnection[], intervalMs: number) { this.service = service; this.connections = connections; this.intervalMs = intervalMs; }
     get running() { return this.activeCycle !== null; }
-    private async executeConnections() { for (const connection of this.connections)
-        await this.service.runConnection(connection); }
+    private async executeConnections() {
+        const snapshotCache = new Map();
+        for (const connection of this.connections)
+            await this.service.runConnection(connection, { snapshotCache });
+    }
     async runOnce() {
         if (this.activeCycle)
             throw new Error('Já existe um ciclo em andamento');

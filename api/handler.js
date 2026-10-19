@@ -58,6 +58,11 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 // server/execution-limits.ts
 var CYCLE_TIME_BUDGET_MS = 27e4;
 var CYCLE_LEASE_SECONDS = 360;
+var CRON_PASS_WINDOW_MS = 45e3;
+function readCronRepeatIntervalMs(value = process.env.CRON_REPEAT_INTERVAL_MS) {
+  const interval = Number(value ?? 2e4);
+  return Number.isFinite(interval) && interval >= 0 ? interval : 2e4;
+}
 
 // server/neon-runtime.ts
 import { Pool } from "pg";
@@ -444,6 +449,7 @@ async function resolveCompanyId(connection, gateway) {
   }
   return matchingCompanies[0].id;
 }
+var GPS_LOOKUP_CONCURRENCY = 8;
 function safeErrorMessage(error) {
   return error instanceof Error ? error.message : "Falha n\xE3o identificada na corre\xE7\xE3o";
 }
@@ -500,58 +506,76 @@ var CorrectionService = class {
     const outsideZoneMissing = companyId !== void 0 && this.rules.outsideZoneName !== "" && findOutsideZone(snapshot.zones, this.rules) === null;
     if (outsideZoneMissing)
       this.notes.push(`zona ${this.rules.outsideZoneName} n\xE3o existe nesta empresa; ocupados n\xE3o s\xE3o movidos`);
-    for (const status of statusesToInspect) {
+    const zoneCompanyIds = new Set(snapshot.zones.map((zone) => zone.companyId).filter((zoneCompanyId) => zoneCompanyId !== null));
+    const gpsByVehicle = new Map(snapshot.gpsPositions.map((position) => [position.vehicleId, position]));
+    for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
       if (Date.now() > this.deadline - 15e3) {
         this.deferred = true;
         break;
       }
-      this.inspectedCount++;
-      await this.repository.saveVehicleCursor?.(connection.id, status.vehicleId);
-      if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
-        continue;
-      const vehicle = vehiclesById.get(status.vehicleId);
-      if (!vehicle)
-        continue;
-      const vehicleCompanyId = companyId ?? vehicle.companyId ?? void 0;
-      const companyIds = new Set(snapshot.zones.map((zone) => zone.companyId).filter((zoneCompanyId) => zoneCompanyId !== null));
-      if (vehicleCompanyId === void 0 && companyIds.size > 1)
-        throw new Error("V\xE1rias empresas nas zonas, mas ve\xEDculo sem companyId; configure uma conex\xE3o por empresa");
-      const companyZones = snapshot.zones.filter((zone) => zone.companyId === null || vehicleCompanyId === void 0 || zone.companyId === vehicleCompanyId);
-      const currentZone = companyZones.find((zone) => zone.id === status.zoneId);
-      if (!currentZone)
-        continue;
-      const outsideZone = findOutsideZone(companyZones, this.rules);
-      const gpsPosition = snapshot.gpsPositions.find((position) => position.vehicleId === status.vehicleId);
-      let gpsZoneId = null;
-      if (!isBusy(status) && gpsPosition)
-        gpsZoneId = await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId);
-      const gpsZone = companyZones.find((zone) => zone.id === gpsZoneId) ?? null;
-      const targetZone = chooseTargetZone(status, currentZone, gpsZone, outsideZone, this.rules);
-      if (!targetZone)
-        continue;
-      const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
-      reservedQueuePositions.set(targetZone.id, queueTail + 1);
-      plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1));
+      const chunk = statusesToInspect.slice(start, start + GPS_LOOKUP_CONCURRENCY);
+      const candidates = await Promise.all(chunk.map(async (status) => {
+        if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
+          return null;
+        const vehicle = vehiclesById.get(status.vehicleId);
+        if (!vehicle)
+          return null;
+        const vehicleCompanyId = companyId ?? vehicle.companyId ?? void 0;
+        if (vehicleCompanyId === void 0 && zoneCompanyIds.size > 1)
+          throw new Error("V\xE1rias empresas nas zonas, mas ve\xEDculo sem companyId; configure uma conex\xE3o por empresa");
+        const companyZones = snapshot.zones.filter((zone) => zone.companyId === null || vehicleCompanyId === void 0 || zone.companyId === vehicleCompanyId);
+        const currentZone = companyZones.find((zone) => zone.id === status.zoneId);
+        if (!currentZone)
+          return null;
+        const gpsPosition = gpsByVehicle.get(status.vehicleId);
+        const gpsZoneId = !isBusy(status) && gpsPosition ? await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+        return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
+      }));
+      for (const candidate of candidates) {
+        if (!candidate)
+          continue;
+        const { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId } = candidate;
+        const gpsZone = companyZones.find((zone) => zone.id === gpsZoneId) ?? null;
+        const targetZone = chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, this.rules), this.rules);
+        if (!targetZone)
+          continue;
+        const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
+        reservedQueuePositions.set(targetZone.id, queueTail + 1);
+        plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1));
+      }
+      this.inspectedCount += chunk.length;
+      await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
     }
     return plannedChanges;
   }
-  async verifyChange(gateway, change, changeId, httpStatus) {
-    const latestStatus = (await gateway.listVehicleStatuses()).find((status) => status.vehicleId === change.vehicleId);
-    const isConfirmed = latestStatus?.zoneId === change.targetZoneId;
-    await this.repository.finishChange(changeId, isConfirmed ? "confirmed" : "unconfirmed", httpStatus, isConfirmed ? "Zona confirmada ap\xF3s envio; posi\xE7\xE3o enviada registrada no hist\xF3rico." : "POST aceito; zona ainda n\xE3o confirmada. Ve\xEDculo bloqueado para nova tentativa autom\xE1tica.");
+  // Uma consulta de status confirma todos os envios do lote.
+  async verifySentChanges(gateway, sentChanges) {
+    if (sentChanges.length === 0)
+      return;
+    let latestStatuses;
+    try {
+      latestStatuses = new Map((await gateway.listVehicleStatuses()).map((status) => [status.vehicleId, status]));
+    } catch {
+      for (const { changeId, httpStatus } of sentChanges)
+        await this.repository.finishChange(changeId, "unconfirmed", httpStatus, "POST aceito; consulta de confirma\xE7\xE3o falhou. N\xE3o repetir automaticamente.");
+      return;
+    }
+    for (const { change, changeId, httpStatus } of sentChanges) {
+      const isConfirmed = latestStatuses.get(change.vehicleId)?.zoneId === change.targetZoneId;
+      await this.repository.finishChange(changeId, isConfirmed ? "confirmed" : "unconfirmed", httpStatus, isConfirmed ? "Zona confirmada ap\xF3s envio; posi\xE7\xE3o enviada registrada no hist\xF3rico." : "POST aceito; zona ainda n\xE3o confirmada. Ve\xEDculo bloqueado para nova tentativa autom\xE1tica.");
+    }
   }
   async recordSendFailure(changeId, error) {
     const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
     const isDefiniteRejection = httpStatus !== null && httpStatus >= 400 && httpStatus < 500;
     await this.repository.finishChange(changeId, isDefiniteRejection ? "failed" : "unknown", httpStatus, isDefiniteRejection ? `Autocab rejeitou a altera\xE7\xE3o: HTTP ${httpStatus}.` : "Resultado incerto. Ve\xEDculo bloqueado at\xE9 uma consulta confirmar o destino.");
   }
-  async executeChange(connection, cycleId, change, gateway, reservedPositions) {
+  async executeChange(connection, cycleId, change, gateway, latestStatuses, reservedPositions, sentChanges) {
     if (this.mode === "dry") {
       const changeId2 = await this.repository.createChange(connection.id, cycleId, this.mode, change, "planned");
       await this.repository.finishChange(changeId2, "planned", null, "Simula\xE7\xE3o com dados reais; nenhum POST enviado.");
       return;
     }
-    const latestStatuses = await gateway.listVehicleStatuses();
     const latestStatus = latestStatuses.find((status) => status.vehicleId === change.vehicleId);
     const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason === "busy-outside") : true;
     if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
@@ -564,11 +588,7 @@ var CorrectionService = class {
     const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, "pending");
     try {
       const httpStatus = await gateway.applyVehiclePlot(change.vehicleId, change.targetZoneId, change.position);
-      try {
-        await this.verifyChange(gateway, change, changeId, httpStatus);
-      } catch {
-        await this.repository.finishChange(changeId, "unconfirmed", httpStatus, "POST aceito; consulta de confirma\xE7\xE3o falhou. N\xE3o repetir automaticamente.");
-      }
+      sentChanges.push({ change, changeId, httpStatus });
     } catch (error) {
       await this.recordSendFailure(changeId, error);
     }
@@ -590,9 +610,15 @@ var CorrectionService = class {
           this.resolvedCompanyIds.set(connection.id, companyId);
         connection = { ...connection, companyId };
       }
-      const snapshot = await this.loadSnapshot(gateway);
+      let snapshotPromise = options.snapshotCache?.get(gateway);
+      if (!snapshotPromise) {
+        snapshotPromise = this.loadSnapshot(gateway);
+        options.snapshotCache?.set(gateway, snapshotPromise);
+        snapshotPromise.catch(() => options.snapshotCache?.delete(gateway));
+      }
+      let snapshot = await snapshotPromise;
       if (connection.companyId !== void 0)
-        snapshot.zones = snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId);
+        snapshot = { ...snapshot, zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
       await this.repository.saveZones(connection.id, snapshot.zones);
       if (this.mode === "live")
         await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
@@ -600,19 +626,28 @@ var CorrectionService = class {
       planned = changes.length;
       inspected = this.inspectedCount;
       const reservedPositions = /* @__PURE__ */ new Map();
-      for (const change of changes) {
-        if (Date.now() > this.deadline - 15e3) {
-          this.deferred = true;
-          await this.repository.saveVehicleCursor?.(connection.id, change.vehicleId - 1);
-          break;
+      const sentChanges = [];
+      const latestStatuses = this.mode === "live" && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
+      try {
+        for (const change of changes) {
+          if (Date.now() > this.deadline - 15e3) {
+            this.deferred = true;
+            await this.repository.saveVehicleCursor?.(connection.id, change.vehicleId - 1);
+            break;
+          }
+          await this.executeChange(connection, cycleId, change, gateway, latestStatuses, reservedPositions, sentChanges);
         }
-        await this.executeChange(connection, cycleId, change, gateway, reservedPositions);
+      } finally {
+        await this.verifySentChanges(gateway, sentChanges);
       }
       if (this.deferred)
         this.notes.push("Tempo do ciclo esgotado; ve\xEDculos restantes ser\xE3o retomados no pr\xF3ximo ciclo.");
-      await this.repository.finishCycle(cycleId, this.deferred ? "partial" : "completed", inspected, planned, this.notes.join(". ") || null);
+      const outcome = this.deferred ? "partial" : "completed";
+      await this.repository.finishCycle(cycleId, outcome, inspected, planned, this.notes.join(". ") || null);
+      return outcome;
     } catch (error) {
       await this.repository.finishCycle(cycleId, "failed", this.inspectedCount, planned, safeErrorMessage(error));
+      return "failed";
     }
   }
 };
@@ -625,6 +660,8 @@ var NeonCycleRunner = class {
   service;
   connections;
   running = false;
+  // Indica se a última execução terminou todas as empresas sem lote parcial nem falha.
+  lastRunCompleted = false;
   constructor(repository, service, connections) {
     this.repository = repository;
     this.service = service;
@@ -636,12 +673,15 @@ var NeonCycleRunner = class {
     this.running = true;
     const owner = randomUUID2();
     let acquired = false;
+    this.lastRunCompleted = false;
     try {
       acquired = await this.repository.acquireCycleLease(owner);
       if (!acquired)
         throw new CycleAlreadyRunningError("Outra inst\xE2ncia est\xE1 executando um ciclo");
       await this.repository.recoverInterruptedCycles();
       const deadline = Date.now() + CYCLE_TIME_BUDGET_MS;
+      const snapshotCache = /* @__PURE__ */ new Map();
+      let completedConnections = 0;
       const nextConnectionIndex = await this.repository.getVehicleCursor(":connection-cursor");
       const startIndex = Math.max(0, nextConnectionIndex) % Math.max(1, this.connections.length);
       for (let offset = 0; offset < this.connections.length; offset++) {
@@ -651,9 +691,11 @@ var NeonCycleRunner = class {
           break;
         const remainingConnections = this.connections.length - offset;
         const connectionDeadline = Date.now() + (deadline - Date.now()) / remainingConnections;
-        await this.service.runConnection(connection, { deadline: connectionDeadline });
+        if (await this.service.runConnection(connection, { deadline: connectionDeadline, snapshotCache }) === "completed")
+          completedConnections++;
         await this.repository.saveVehicleCursor(":connection-cursor", (connectionIndex + 1) % this.connections.length);
       }
+      this.lastRunCompleted = completedConnections === this.connections.length;
     } finally {
       try {
         if (acquired)
@@ -812,7 +854,15 @@ function createServerlessHandler(loadRuntime2) {
         sendJson(response, 200, await runtime.repository.getDashboard(query.get("connectionId")));
         return;
       }
+      const startedAt = Date.now();
       await runtime.runner.runOnce();
+      if (isCron) {
+        const repeatIntervalMs = readCronRepeatIntervalMs();
+        while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs < CRON_PASS_WINDOW_MS) {
+          await new Promise((resolve) => setTimeout(resolve, repeatIntervalMs));
+          await runtime.runner.runOnce();
+        }
+      }
       sendJson(response, 200, { completed: true, note: "Consulte o hist\xF3rico de ciclos para resultados e lotes pendentes." });
     } catch (error) {
       if (error instanceof CycleAlreadyRunningError) {

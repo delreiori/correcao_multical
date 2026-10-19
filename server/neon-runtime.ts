@@ -18,6 +18,8 @@ export class NeonCycleRunner implements CycleRuntime {
     private service: CorrectionService;
     private connections: CorrectionConnection[];
     running = false;
+    // Indica se a última execução terminou todas as empresas sem lote parcial nem falha.
+    lastRunCompleted = false;
     constructor(repository: PostgresAuditRepository, service: CorrectionService, connections: CorrectionConnection[]) { this.repository = repository; this.service = service; this.connections = connections; }
     async runOnce() {
         if (this.running)
@@ -25,12 +27,15 @@ export class NeonCycleRunner implements CycleRuntime {
         this.running = true;
         const owner = randomUUID();
         let acquired = false;
+        this.lastRunCompleted = false;
         try {
             acquired = await this.repository.acquireCycleLease(owner);
             if (!acquired)
                 throw new CycleAlreadyRunningError('Outra instância está executando um ciclo');
             await this.repository.recoverInterruptedCycles();
             const deadline = Date.now() + CYCLE_TIME_BUDGET_MS;
+            const snapshotCache = new Map();
+            let completedConnections = 0;
             const nextConnectionIndex = await this.repository.getVehicleCursor(':connection-cursor');
             const startIndex = Math.max(0, nextConnectionIndex) % Math.max(1, this.connections.length);
             for (let offset = 0; offset < this.connections.length; offset++) {
@@ -41,9 +46,11 @@ export class NeonCycleRunner implements CycleRuntime {
                 // Divide o tempo restante entre as empresas que faltam, para todas rodarem a cada ciclo.
                 const remainingConnections = this.connections.length - offset;
                 const connectionDeadline = Date.now() + (deadline - Date.now()) / remainingConnections;
-                await this.service.runConnection(connection, { deadline: connectionDeadline });
+                if (await this.service.runConnection(connection, { deadline: connectionDeadline, snapshotCache }) === 'completed')
+                    completedConnections++;
                 await this.repository.saveVehicleCursor(':connection-cursor', (connectionIndex + 1) % this.connections.length);
             }
+            this.lastRunCompleted = completedConnections === this.connections.length;
         }
         finally {
             try {
