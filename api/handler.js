@@ -401,9 +401,9 @@ function findOutsideZone(zones, rules) {
   if (!rules.outsideZoneName)
     return null;
   const matchingZones = zones.filter((zone) => normalizeZoneName(zone.name) === normalizeZoneName(rules.outsideZoneName));
-  if (matchingZones.length !== 1)
-    throw new Error("Zona FORA DE AREA configurada est\xE1 ausente ou amb\xEDgua nesta conex\xE3o/empresa");
-  return matchingZones[0];
+  if (matchingZones.length > 1)
+    throw new Error("Zona FORA DE AREA configurada est\xE1 amb\xEDgua nesta conex\xE3o/empresa");
+  return matchingZones[0] ?? null;
 }
 function chooseTargetZone(status, currentZone, gpsZone, outsideZone, rules) {
   if (status.hasPenalty)
@@ -433,7 +433,11 @@ async function resolveCompanyId(connection, gateway) {
   if (connection.companyId !== void 0 || connection.companyName === void 0)
     return connection.companyId;
   const companies = await gateway.listCompanies();
-  const matchingCompanies = companies.filter((company) => company.name !== null && normalizeZoneName(company.name) === normalizeZoneName(connection.companyName));
+  const wantedName = normalizeZoneName(connection.companyName);
+  const namedCompanies = companies.filter((company) => company.name !== null);
+  let matchingCompanies = namedCompanies.filter((company) => normalizeZoneName(company.name) === wantedName);
+  if (matchingCompanies.length === 0)
+    matchingCompanies = namedCompanies.filter((company) => normalizeZoneName(company.name).includes(wantedName));
   if (matchingCompanies.length !== 1) {
     const available = companies.map((company) => `${company.id}${company.name ? " " + company.name : ""}`).join(", ") || "nenhuma";
     throw new Error(`Empresa "${connection.companyName}" ${matchingCompanies.length ? "amb\xEDgua" : "n\xE3o encontrada"} no GET de empresas; configure o companyId. Dispon\xEDveis: ${available}`);
@@ -450,6 +454,7 @@ var CorrectionService = class {
   deadline = Infinity;
   deferred = false;
   inspectedCount = 0;
+  notes = [];
   resolvedCompanyIds = /* @__PURE__ */ new Map();
   constructor(repository, rules, mode) {
     this.repository = repository;
@@ -482,7 +487,19 @@ var CorrectionService = class {
     const orderedStatuses = [...snapshot.statuses].sort((left, right) => left.vehicleId - right.vehicleId);
     const statusesAfterCursor = orderedStatuses.filter((status) => status.vehicleId > cursor);
     const statusesBeforeCursor = orderedStatuses.filter((status) => status.vehicleId <= cursor);
-    const statusesToInspect = [...statusesAfterCursor, ...statusesBeforeCursor];
+    const vehiclesById = new Map(snapshot.vehicles.map((vehicle) => [vehicle.id, vehicle]));
+    let statusesToInspect = [...statusesAfterCursor, ...statusesBeforeCursor];
+    if (connection.companyId !== void 0) {
+      const withoutCompany = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId == null).length;
+      statusesToInspect = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId === connection.companyId);
+      this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} ve\xEDculos da empresa de ${snapshot.statuses.length} retornados`);
+      if (withoutCompany > 0)
+        this.notes.push(`${withoutCompany} ve\xEDculos sem companyId ignorados`);
+    }
+    const companyId = connection.companyId;
+    const outsideZoneMissing = companyId !== void 0 && this.rules.outsideZoneName !== "" && findOutsideZone(snapshot.zones, this.rules) === null;
+    if (outsideZoneMissing)
+      this.notes.push(`zona ${this.rules.outsideZoneName} n\xE3o existe nesta empresa; ocupados n\xE3o s\xE3o movidos`);
     for (const status of statusesToInspect) {
       if (Date.now() > this.deadline - 15e3) {
         this.deferred = true;
@@ -492,20 +509,14 @@ var CorrectionService = class {
       await this.repository.saveVehicleCursor?.(connection.id, status.vehicleId);
       if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
         continue;
-      const vehicle = snapshot.vehicles.find((vehicle2) => vehicle2.id === status.vehicleId);
+      const vehicle = vehiclesById.get(status.vehicleId);
       if (!vehicle)
         continue;
-      if (connection.companyId !== void 0) {
-        if (vehicle.companyId === null)
-          throw new Error("N\xE3o \xE9 poss\xEDvel filtrar empresa: ve\xEDculo sem companyId");
-        if (vehicle.companyId !== connection.companyId)
-          continue;
-      }
-      const companyId = connection.companyId ?? vehicle.companyId ?? void 0;
-      const companyIds = new Set(snapshot.zones.map((zone) => zone.companyId).filter((companyId2) => companyId2 !== null));
-      if (companyId === void 0 && companyIds.size > 1)
+      const vehicleCompanyId = companyId ?? vehicle.companyId ?? void 0;
+      const companyIds = new Set(snapshot.zones.map((zone) => zone.companyId).filter((zoneCompanyId) => zoneCompanyId !== null));
+      if (vehicleCompanyId === void 0 && companyIds.size > 1)
         throw new Error("V\xE1rias empresas nas zonas, mas ve\xEDculo sem companyId; configure uma conex\xE3o por empresa");
-      const companyZones = snapshot.zones.filter((zone) => zone.companyId === null || companyId === void 0 || zone.companyId === companyId);
+      const companyZones = snapshot.zones.filter((zone) => zone.companyId === null || vehicleCompanyId === void 0 || zone.companyId === vehicleCompanyId);
       const currentZone = companyZones.find((zone) => zone.id === status.zoneId);
       if (!currentZone)
         continue;
@@ -513,7 +524,7 @@ var CorrectionService = class {
       const gpsPosition = snapshot.gpsPositions.find((position) => position.vehicleId === status.vehicleId);
       let gpsZoneId = null;
       if (!isBusy(status) && gpsPosition)
-        gpsZoneId = await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, companyId);
+        gpsZoneId = await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId);
       const gpsZone = companyZones.find((zone) => zone.id === gpsZoneId) ?? null;
       const targetZone = chooseTargetZone(status, currentZone, gpsZone, outsideZone, this.rules);
       if (!targetZone)
@@ -566,6 +577,7 @@ var CorrectionService = class {
     this.deadline = options.deadline ?? Infinity;
     this.deferred = false;
     this.inspectedCount = 0;
+    this.notes = [];
     const cycleId = await this.repository.startCycle(connection.id, this.mode);
     let inspected = 0, planned = 0;
     try {
@@ -596,7 +608,9 @@ var CorrectionService = class {
         }
         await this.executeChange(connection, cycleId, change, gateway, reservedPositions);
       }
-      await this.repository.finishCycle(cycleId, this.deferred ? "partial" : "completed", inspected, planned, this.deferred ? "Tempo do ciclo esgotado; ve\xEDculos restantes ser\xE3o retomados no pr\xF3ximo ciclo." : null);
+      if (this.deferred)
+        this.notes.push("Tempo do ciclo esgotado; ve\xEDculos restantes ser\xE3o retomados no pr\xF3ximo ciclo.");
+      await this.repository.finishCycle(cycleId, this.deferred ? "partial" : "completed", inspected, planned, this.notes.join(". ") || null);
     } catch (error) {
       await this.repository.finishCycle(cycleId, "failed", this.inspectedCount, planned, safeErrorMessage(error));
     }
@@ -635,7 +649,9 @@ var NeonCycleRunner = class {
         const connection = this.connections[connectionIndex];
         if (Date.now() > deadline - 15e3)
           break;
-        await this.service.runConnection(connection, { deadline });
+        const remainingConnections = this.connections.length - offset;
+        const connectionDeadline = Date.now() + (deadline - Date.now()) / remainingConnections;
+        await this.service.runConnection(connection, { deadline: connectionDeadline });
         await this.repository.saveVehicleCursor(":connection-cursor", (connectionIndex + 1) % this.connections.length);
       }
     } finally {
@@ -704,7 +720,8 @@ async function listCompaniesForConnections(connections) {
   const gateway = connections.find((connection) => connection.gateway !== null)?.gateway;
   if (!gateway)
     throw new Error("Subscription Key ausente; configure AUTOCAB_SUBSCRIPTION_KEY");
-  const companies = await gateway.listCompanies();
+  const [companyList, vehicles, zones] = await Promise.all([gateway.listCompanies(), gateway.listVehicles(), gateway.listZones()]);
+  const companies = companyList.map((company) => ({ ...company, vehicles: vehicles.filter((vehicle) => vehicle.companyId === company.id).length, zones: zones.filter((zone) => zone.companyId === company.id).length }));
   const selected = await Promise.all(connections.map(async (connection) => {
     try {
       const companyId = connection.gateway ? await resolveCompanyId(connection, connection.gateway) : void 0;

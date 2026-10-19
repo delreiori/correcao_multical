@@ -17,7 +17,12 @@ export async function resolveCompanyId(connection: CorrectionConnection, gateway
     if (connection.companyId !== undefined || connection.companyName === undefined)
         return connection.companyId;
     const companies = await gateway.listCompanies();
-    const matchingCompanies = companies.filter(company => company.name !== null && normalizeZoneName(company.name) === normalizeZoneName(connection.companyName!));
+    const wantedName = normalizeZoneName(connection.companyName);
+    const namedCompanies = companies.filter(company => company.name !== null);
+    // Nome exato primeiro; senão aceita um único nome que contenha o configurado (ex.: "Arcoverde Táxi").
+    let matchingCompanies = namedCompanies.filter(company => normalizeZoneName(company.name!) === wantedName);
+    if (matchingCompanies.length === 0)
+        matchingCompanies = namedCompanies.filter(company => normalizeZoneName(company.name!).includes(wantedName));
     if (matchingCompanies.length !== 1) {
         const available = companies.map(company => `${company.id}${company.name ? ' ' + company.name : ''}`).join(', ') || 'nenhuma';
         throw new Error(`Empresa "${connection.companyName}" ${matchingCompanies.length ? 'ambígua' : 'não encontrada'} no GET de empresas; configure o companyId. Disponíveis: ${available}`);
@@ -32,6 +37,7 @@ export class CorrectionService {
     private deadline = Infinity;
     private deferred = false;
     private inspectedCount = 0;
+    private notes: string[] = [];
     private resolvedCompanyIds = new Map<string, number>();
     constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode) { this.repository = repository; this.rules = rules; this.mode = mode; }
     private async loadSnapshot(gateway: AutocabGateway): Promise<FleetSnapshot> {
@@ -60,7 +66,20 @@ export class CorrectionService {
         const orderedStatuses = [...snapshot.statuses].sort((left, right) => left.vehicleId - right.vehicleId);
         const statusesAfterCursor = orderedStatuses.filter(status => status.vehicleId > cursor);
         const statusesBeforeCursor = orderedStatuses.filter(status => status.vehicleId <= cursor);
-        const statusesToInspect = [...statusesAfterCursor, ...statusesBeforeCursor];
+        const vehiclesById = new Map(snapshot.vehicles.map(vehicle => [vehicle.id, vehicle]));
+        let statusesToInspect = [...statusesAfterCursor, ...statusesBeforeCursor];
+        if (connection.companyId !== undefined) {
+            // Percorre somente a frota desta empresa; a chave Multicall devolve os veículos de todas.
+            const withoutCompany = statusesToInspect.filter(status => vehiclesById.get(status.vehicleId)?.companyId == null).length;
+            statusesToInspect = statusesToInspect.filter(status => vehiclesById.get(status.vehicleId)?.companyId === connection.companyId);
+            this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} veículos da empresa de ${snapshot.statuses.length} retornados`);
+            if (withoutCompany > 0)
+                this.notes.push(`${withoutCompany} veículos sem companyId ignorados`);
+        }
+        const companyId = connection.companyId;
+        const outsideZoneMissing = companyId !== undefined && this.rules.outsideZoneName !== '' && findOutsideZone(snapshot.zones, this.rules) === null;
+        if (outsideZoneMissing)
+            this.notes.push(`zona ${this.rules.outsideZoneName} não existe nesta empresa; ocupados não são movidos`);
         for (const status of statusesToInspect) {
             if (Date.now() > this.deadline - 15000) {
                 this.deferred = true;
@@ -70,20 +89,14 @@ export class CorrectionService {
             await this.repository.saveVehicleCursor?.(connection.id, status.vehicleId);
             if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
                 continue;
-            const vehicle = snapshot.vehicles.find(vehicle => vehicle.id === status.vehicleId);
+            const vehicle = vehiclesById.get(status.vehicleId);
             if (!vehicle)
                 continue;
-            if (connection.companyId !== undefined) {
-                if (vehicle.companyId === null)
-                    throw new Error('Não é possível filtrar empresa: veículo sem companyId');
-                if (vehicle.companyId !== connection.companyId)
-                    continue;
-            }
-            const companyId = connection.companyId ?? vehicle.companyId ?? undefined;
-            const companyIds = new Set(snapshot.zones.map(zone => zone.companyId).filter(companyId => companyId !== null));
-            if (companyId === undefined && companyIds.size > 1)
+            const vehicleCompanyId = companyId ?? vehicle.companyId ?? undefined;
+            const companyIds = new Set(snapshot.zones.map(zone => zone.companyId).filter(zoneCompanyId => zoneCompanyId !== null));
+            if (vehicleCompanyId === undefined && companyIds.size > 1)
                 throw new Error('Várias empresas nas zonas, mas veículo sem companyId; configure uma conexão por empresa');
-            const companyZones = snapshot.zones.filter(zone => zone.companyId === null || companyId === undefined || zone.companyId === companyId);
+            const companyZones = snapshot.zones.filter(zone => zone.companyId === null || vehicleCompanyId === undefined || zone.companyId === vehicleCompanyId);
             const currentZone = companyZones.find(zone => zone.id === status.zoneId);
             if (!currentZone)
                 continue;
@@ -91,7 +104,7 @@ export class CorrectionService {
             const gpsPosition = snapshot.gpsPositions.find(position => position.vehicleId === status.vehicleId);
             let gpsZoneId: number | null = null;
             if (!isBusy(status) && gpsPosition)
-                gpsZoneId = await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, companyId);
+                gpsZoneId = await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId);
             const gpsZone = companyZones.find(zone => zone.id === gpsZoneId) ?? null;
             const targetZone = chooseTargetZone(status, currentZone, gpsZone, outsideZone, this.rules);
             if (!targetZone)
@@ -148,6 +161,7 @@ export class CorrectionService {
         this.deadline = options.deadline ?? Infinity;
         this.deferred = false;
         this.inspectedCount = 0;
+        this.notes = [];
         const cycleId = await this.repository.startCycle(connection.id, this.mode);
         let inspected = 0, planned = 0;
         try {
@@ -180,7 +194,9 @@ export class CorrectionService {
                 }
                 await this.executeChange(connection, cycleId, change, gateway, reservedPositions);
             }
-            await this.repository.finishCycle(cycleId, this.deferred ? 'partial' : 'completed', inspected, planned, this.deferred ? 'Tempo do ciclo esgotado; veículos restantes serão retomados no próximo ciclo.' : null);
+            if (this.deferred)
+                this.notes.push('Tempo do ciclo esgotado; veículos restantes serão retomados no próximo ciclo.');
+            await this.repository.finishCycle(cycleId, this.deferred ? 'partial' : 'completed', inspected, planned, this.notes.join('. ') || null);
         }
         catch (error) {
             await this.repository.finishCycle(cycleId, 'failed', this.inspectedCount, planned, safeErrorMessage(error));

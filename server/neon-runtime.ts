@@ -38,7 +38,10 @@ export class NeonCycleRunner implements CycleRuntime {
                 const connection = this.connections[connectionIndex];
                 if (Date.now() > deadline - 15000)
                     break;
-                await this.service.runConnection(connection, { deadline });
+                // Divide o tempo restante entre as empresas que faltam, para todas rodarem a cada ciclo.
+                const remainingConnections = this.connections.length - offset;
+                const connectionDeadline = Date.now() + (deadline - Date.now()) / remainingConnections;
+                await this.service.runConnection(connection, { deadline: connectionDeadline });
                 await this.repository.saveVehicleCursor(':connection-cursor', (connectionIndex + 1) % this.connections.length);
             }
         }

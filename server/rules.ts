@@ -13,9 +13,10 @@ export function findOutsideZone(zones: Zone[], rules: ZoneRules): Zone | null {
     if (!rules.outsideZoneName)
         return null;
     const matchingZones = zones.filter(zone => normalizeZoneName(zone.name) === normalizeZoneName(rules.outsideZoneName));
-    if (matchingZones.length !== 1)
-        throw new Error('Zona FORA DE AREA configurada está ausente ou ambígua nesta conexão/empresa');
-    return matchingZones[0];
+    if (matchingZones.length > 1)
+        throw new Error('Zona FORA DE AREA configurada está ambígua nesta conexão/empresa');
+    // Empresa sem a zona: a regra dos ocupados fica desativada, mas a correção por GPS continua.
+    return matchingZones[0] ?? null;
 }
 export function chooseTargetZone(status: VehicleStatus, currentZone: Zone, gpsZone: Zone | null, outsideZone: Zone | null, rules: ZoneRules): Zone | null {
     if (status.hasPenalty)

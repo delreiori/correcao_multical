@@ -76,3 +76,34 @@ test('configuração padrão cria Arcoverde, São Conrado e Pedra da Gávea com 
         else process.env.AUTOCAB_COMPANY_ID_ARCOVERDE = previous;
     }
 });
+test('as três empresas rodam no mesmo ciclo e empresa sem FORA DE AREA ainda corrige por GPS', async () => {
+    const { gateway } = createMulticallGateway();
+    gateway.listCompanies = async () => [{ id: 1, name: 'Arcoverde Táxi' }, { id: 2, name: 'São Conrado' }, { id: 3, name: 'Pedra da Gávea' }];
+    const baseZones = await gateway.listZones();
+    gateway.listZones = async () => [...baseZones.filter(zone => !(zone.companyId === 1 && zone.name === 'FORA DE AREA')), { id: 30, name: 'Centro', companyId: 3 }, { id: 31, name: 'Praia', companyId: 3 }];
+    gateway.listVehicles = async () => [{ id: 201, callsign: 'A1', companyId: 1 }, { id: 202, callsign: 'S1', companyId: 2 }, { id: 203, callsign: 'P1', companyId: 3 }];
+    gateway.listVehicleStatuses = async () => [
+        { vehicleId: 201, zoneId: 10, queuePosition: 1, status: 'Available', hasPenalty: false },
+        { vehicleId: 202, zoneId: 20, queuePosition: 1, status: 'Available', hasPenalty: false },
+        { vehicleId: 203, zoneId: 30, queuePosition: 1, status: 'Available', hasPenalty: false },
+    ];
+    gateway.listGpsPositions = async () => [201, 202, 203].map(vehicleId => ({ vehicleId, latitude: -22.9, longitude: -43.2 }));
+    gateway.findZoneByCoordinates = async (_latitude: number, _longitude: number, companyId?: number) => companyId === 1 ? 11 : companyId === 2 ? 21 : companyId === 3 ? 31 : null;
+    const { PGlite } = await import('@electric-sql/pglite');
+    const { PostgresAuditRepository } = await import('../server/postgres-repository.ts');
+    const { NeonCycleRunner } = await import('../server/neon-runtime.ts');
+    const database = new PGlite();
+    const repository = new PostgresAuditRepository({ query: async (sql, parameters) => sql.includes(';') && !parameters ? (await database.exec(sql), { rows: [] }) : { rows: (await database.query(sql, parameters)).rows as Record<string, unknown>[] } });
+    await repository.initialize();
+    const connections = [
+        { id: 'arcoverde', name: 'Arcoverde', companyName: 'Arcoverde', gateway },
+        { id: 'sao-conrado', name: 'São Conrado', companyName: 'São Conrado', gateway },
+        { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyName: 'Pedra da Gávea', gateway },
+    ];
+    await new NeonCycleRunner(repository, new CorrectionService(repository, rules, 'dry'), connections).runOnce();
+    const dashboard = await repository.getDashboard();
+    assert.deepEqual(dashboard.cycles.map(cycle => [cycle.connectionId, cycle.outcome]).sort(), [['arcoverde', 'completed'], ['pedra-da-gavea', 'completed'], ['sao-conrado', 'completed']]);
+    assert.deepEqual(dashboard.changes.map(change => [change.connectionId, change.vehicleId, change.targetZoneId]).sort(), [['arcoverde', 201, 11], ['pedra-da-gavea', 203, 31], ['sao-conrado', 202, 21]]);
+    assert.match(dashboard.cycles.find(cycle => cycle.connectionId === 'arcoverde')?.detail ?? '', /companyId 1: 1 veículos.*FORA DE AREA não existe/);
+    await database.close();
+});

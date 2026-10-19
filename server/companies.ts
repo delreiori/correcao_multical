@@ -2,7 +2,7 @@ import type { CorrectionConnection } from './correction-service.ts';
 import { resolveCompanyId } from './correction-service.ts';
 import type { Company } from '../shared/types.ts';
 export interface CompanyListing {
-    companies: Company[];
+    companies: (Company & { vehicles: number; zones: number })[];
     selected: { connectionId: string; name: string; companyId: number | null; error: string | null }[];
 }
 // GET de todas as empresas visíveis à chave e indicação de quais conexões as utilizam.
@@ -10,7 +10,9 @@ export async function listCompaniesForConnections(connections: CorrectionConnect
     const gateway = connections.find(connection => connection.gateway !== null)?.gateway;
     if (!gateway)
         throw new Error('Subscription Key ausente; configure AUTOCAB_SUBSCRIPTION_KEY');
-    const companies = await gateway.listCompanies();
+    const [companyList, vehicles, zones] = await Promise.all([gateway.listCompanies(), gateway.listVehicles(), gateway.listZones()]);
+    // Quantidade de veículos e zonas por companyId ajuda a ver se a empresa realmente tem frota na chave.
+    const companies = companyList.map(company => ({ ...company, vehicles: vehicles.filter(vehicle => vehicle.companyId === company.id).length, zones: zones.filter(zone => zone.companyId === company.id).length }));
     const selected = await Promise.all(connections.map(async connection => {
         try {
             const companyId = connection.gateway ? await resolveCompanyId(connection, connection.gateway) : undefined;
