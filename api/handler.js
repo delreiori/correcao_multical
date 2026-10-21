@@ -141,9 +141,9 @@ function readDriverMessageRecipients() {
   return value.split(",").map((recipient) => recipient.trim()).filter(Boolean);
 }
 function readDriverMessagePath() {
-  const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || "/vehicle/v1/vehicles/{vehicleId}/message";
-  if (!path.startsWith("/") || !path.includes("{vehicleId}"))
-    throw new Error("AUTOCAB_DRIVER_MESSAGE_PATH deve come\xE7ar com / e conter {vehicleId}");
+  const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || "/vehicle/v1/vehicles/message";
+  if (!path.startsWith("/"))
+    throw new Error("AUTOCAB_DRIVER_MESSAGE_PATH deve come\xE7ar com /");
   return path;
 }
 function readConfiguration() {
@@ -247,7 +247,7 @@ var AutocabClient = class {
     this.requestFetch = requestFetch;
     this.timeoutMs = timeoutMs;
     this.companiesPath = options.companiesPath ?? "/booking/v1/companies";
-    this.driverMessagePath = options.driverMessagePath ?? "/vehicle/v1/vehicles/{vehicleId}/message";
+    this.driverMessagePath = options.driverMessagePath ?? "/vehicle/v1/vehicles/message";
   }
   async sendRequest(path, method = "GET", body) {
     const headers = { "Accept": "application/json", "Ocp-Apim-Subscription-Key": this.subscriptionKey };
@@ -316,9 +316,9 @@ var AutocabClient = class {
     await response.arrayBuffer();
     return response.status;
   }
-  // Mensagem da central para o terminal do motorista; o caminho vem de AUTOCAB_DRIVER_MESSAGE_PATH.
+  // "Send Message to Vehicle(s)" da Vehicle API: mensagem da central para o terminal do motorista.
   async sendDriverMessage(vehicleId, message) {
-    const response = await this.sendRequest(this.driverMessagePath.replace("{vehicleId}", String(vehicleId)), "POST", { vehicleId, message });
+    const response = await this.sendRequest(this.driverMessagePath, "POST", { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [] });
     await response.arrayBuffer();
     return response.status;
   }

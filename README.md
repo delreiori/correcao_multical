@@ -26,7 +26,7 @@ Na Arcoverde, sempre que a ordem da fila de uma zona muda (pelo sistema ou não)
 
 Em teste, os avisos vão **só para o motorista 5013 (Luciano)**; a fila listada na mensagem continua completa. `DRIVER_MESSAGES_ONLY` muda a lista (callsigns ou IDs separados por vírgula) e `DRIVER_MESSAGES_ONLY=*` libera para todos os motoristas livres da zona.
 
-`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. `DRIVER_MESSAGES_MODE=live` envia de verdade, mesmo com `AUTOCAB_MODE=dry`, para testar a mensagem sem mover carros. O envio é um POST em `AUTOCAB_DRIVER_MESSAGE_PATH` (padrão `/vehicle/v1/vehicles/{vehicleId}/message`) com corpo `{ vehicleId, message }`; confira esse caminho com a Autocab antes de ativar. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
+`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. `DRIVER_MESSAGES_MODE=live` envia de verdade, mesmo com `AUTOCAB_MODE=dry`, para testar a mensagem sem mover carros. O envio usa "Send Message to Vehicle(s)" da Vehicle API: POST em `/vehicle/v1/vehicles/message` (alterável em `AUTOCAB_DRIVER_MESSAGE_PATH`) com corpo `{ text, vehicles: [vehicleId] }`, uma requisição por motorista porque o texto traz a posição de cada um. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
 
 ## Instalação e execução
 
@@ -64,6 +64,7 @@ Base: `https://autocab-api.azure-api.net`. Header: `Ocp-Apim-Subscription-Key`.
 | GET | `/vehicle/v1/vehiclegpsposition` | Coordenadas dos veículos |
 | GET | `/booking/v1/zone?latitude=...&longitude=...&companyId=...` | Zona correspondente ao GPS; companyId enviado quando conhecido |
 | POST | `/vehicle/v1/vehicles/{vehicleId}/plot` | Corpo `{ vehicleId, zoneId, position }` |
+| POST | `/vehicle/v1/vehicles/message` | Aviso de fila ao motorista; corpo `{ text, vehicles, companies, capabilities, zones }` |
 
 Esses caminhos vêm do core fornecido. Os quatro endpoints de listas já foram verificados em consultas reais. O POST de plot foi testado apenas com respostas simuladas. O cliente espera arrays nos endpoints de lista e IDs numéricos. Em statuses, exige `id`, `vehicleStatusType` e presença de `penalty`; sem esses campos interrompe o ciclo em vez de presumir veículo livre. O GPS usa `id` ou `vehicleId` e `location.latitude/longitude`. Respostas incompatíveis aparecem no histórico de ciclos.
 

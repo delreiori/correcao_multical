@@ -81,7 +81,7 @@ export class AutocabClient implements AutocabGateway {
         this.requestFetch = requestFetch;
         this.timeoutMs = timeoutMs;
         this.companiesPath = options.companiesPath ?? '/booking/v1/companies';
-        this.driverMessagePath = options.driverMessagePath ?? '/vehicle/v1/vehicles/{vehicleId}/message';
+        this.driverMessagePath = options.driverMessagePath ?? '/vehicle/v1/vehicles/message';
     }
     private async sendRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<Response> {
         const headers: Record<string, string> = { 'Accept': 'application/json', 'Ocp-Apim-Subscription-Key': this.subscriptionKey };
@@ -145,9 +145,9 @@ export class AutocabClient implements AutocabGateway {
         await response.arrayBuffer();
         return response.status;
     }
-    // Mensagem da central para o terminal do motorista; o caminho vem de AUTOCAB_DRIVER_MESSAGE_PATH.
+    // "Send Message to Vehicle(s)" da Vehicle API: mensagem da central para o terminal do motorista.
     async sendDriverMessage(vehicleId: number, message: string) {
-        const response = await this.sendRequest(this.driverMessagePath.replace('{vehicleId}', String(vehicleId)), 'POST', { vehicleId, message });
+        const response = await this.sendRequest(this.driverMessagePath, 'POST', { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [] });
         await response.arrayBuffer();
         return response.status;
     }

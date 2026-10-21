@@ -91,9 +91,9 @@ function readDriverMessageRecipients(): string[] | null {
     return value.split(',').map(recipient => recipient.trim()).filter(Boolean);
 }
 function readDriverMessagePath() {
-    const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || '/vehicle/v1/vehicles/{vehicleId}/message';
-    if (!path.startsWith('/') || !path.includes('{vehicleId}'))
-        throw new Error('AUTOCAB_DRIVER_MESSAGE_PATH deve começar com / e conter {vehicleId}');
+    const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || '/vehicle/v1/vehicles/message';
+    if (!path.startsWith('/'))
+        throw new Error('AUTOCAB_DRIVER_MESSAGE_PATH deve começar com /');
     return path;
 }
 export function readConfiguration(): AppConfig {

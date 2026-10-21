@@ -210,3 +210,13 @@ test('DRIVER_MESSAGES_ONLY usa 5013 por padrão e * libera para todos', () => {
         else process.env.DRIVER_MESSAGES_ONLY = previous;
     }
 });
+test('mensagem ao motorista usa Send Message to Vehicle(s) da Vehicle API', async () => {
+    let request: { path: string; method?: string; body: unknown } | null = null;
+    const fakeFetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+        request = { path: new URL(String(input)).pathname, method: init?.method, body: JSON.parse(String(init?.body)) };
+        return Response.json({ messagesQueued: false, vehicles: { workingVehicles: [], nonWorkingVehicles: [5013] } });
+    }) as typeof fetch;
+    const client = new AutocabClient('https://autocab-api.azure-api.net', 'key', fakeFetch);
+    assert.equal(await client.sendDriverMessage(5013, 'fila'), 200);
+    assert.deepEqual(request, { path: '/vehicle/v1/vehicles/message', method: 'POST', body: { text: 'fila', vehicles: [5013], companies: [], capabilities: [], zones: [] } });
+});

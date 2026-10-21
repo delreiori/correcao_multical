@@ -19,7 +19,7 @@ Em Settings → Environment Variables configure para Production:
 | `CRON_REPEAT_INTERVAL_MS` | Opcional: intervalo das passadas extras dentro de cada cron (padrão 20000; 0 desliga) |
 | `DRIVER_MESSAGES_MODE` | Avisos de fila da Arcoverde: `off`, `dry` (padrão, só registra) ou `live` (envia, mesmo com AUTOCAB_MODE=dry) |
 | `DRIVER_MESSAGES_ONLY` | Quem recebe os avisos: callsigns/IDs separados por vírgula. Padrão `5013` (teste com o Luciano); `*` libera para todos |
-| `AUTOCAB_DRIVER_MESSAGE_PATH` | Endpoint de mensagem da central para o motorista, com `{vehicleId}` (padrão `/vehicle/v1/vehicles/{vehicleId}/message`) |
+| `AUTOCAB_DRIVER_MESSAGE_PATH` | Opcional: endpoint de mensagem ao motorista (padrão `/vehicle/v1/vehicles/message`, da Vehicle API) |
 | `AUTOCAB_MODE` | `dry` para validar consultas e planos sem mover veículos |
 
 Crie os tokens em um gerenciador de senhas ou com `openssl rand -hex 32` na sua máquina. Não coloque valores em arquivos versionados, mensagens ou URLs. Digite somente PANEL_TOKEN no campo de senha do painel. A chave Autocab e a conexão Neon ficam no backend. O `.env` local não substitui as variáveis da Vercel.
