@@ -939,6 +939,7 @@ async function listCompaniesForConnections(connections) {
 }
 
 // server/serverless-handler.ts
+import { waitUntil } from "@vercel/functions";
 function hasBearerToken(request, token) {
   if (!token)
     return false;
@@ -966,7 +967,34 @@ function hasValidOrigin(request) {
     return false;
   }
 }
-function createServerlessHandler(loadRuntime2) {
+function logBackendError(context, error) {
+  const errorCode = error && typeof error === "object" && "code" in error ? ` (${String(error.code)})` : "";
+  console.error(`${context}: ${error instanceof Error ? error.name : "erro"}${errorCode}`);
+}
+async function runCronPasses(runtime) {
+  const startedAt = Date.now();
+  const repeatIntervalMs = readCronRepeatIntervalMs();
+  let lastPassMs = 0;
+  try {
+    for (let pass = 0; pass === 0 || repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS; pass++) {
+      if (pass > 0)
+        await new Promise((resolve) => setTimeout(resolve, repeatIntervalMs));
+      const passStartedAt = Date.now();
+      await runtime.runner.runOnce();
+      lastPassMs = Date.now() - passStartedAt;
+    }
+  } catch (error) {
+    if (error instanceof CycleAlreadyRunningError)
+      console.log("Cron pulado: ciclo anterior ainda em andamento.");
+    else
+      logBackendError("Falha no ciclo do cron", error);
+  }
+}
+function runOnVercelInBackground(work) {
+  waitUntil(work);
+  return Promise.resolve();
+}
+function createServerlessHandler(loadRuntime2, runInBackground = runOnVercelInBackground) {
   return async (request, response) => {
     const { path, query } = getRequestPath(request);
     const isCron = path === "/api/cron";
@@ -1021,38 +1049,19 @@ function createServerlessHandler(loadRuntime2) {
         sendJson(response, 200, await runtime.repository.getDashboard(query.get("connectionId")));
         return;
       }
-      const startedAt = Date.now();
-      await runtime.runner.runOnce();
-      let passes = 1;
       if (isCron) {
-        const repeatIntervalMs = readCronRepeatIntervalMs();
-        let lastPassMs = Date.now() - startedAt;
-        while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS) {
-          await new Promise((resolve) => setTimeout(resolve, repeatIntervalMs));
-          const passStartedAt = Date.now();
-          try {
-            await runtime.runner.runOnce();
-          } catch (error) {
-            if (error instanceof CycleAlreadyRunningError)
-              break;
-            throw error;
-          }
-          lastPassMs = Date.now() - passStartedAt;
-          passes++;
-        }
+        await runInBackground(runCronPasses(runtime));
+        sendJson(response, 202, { accepted: true, note: "Ciclo iniciado em segundo plano; consulte o hist\xF3rico de ciclos no painel." });
+        return;
       }
-      sendJson(response, 200, { completed: true, passes, note: "Consulte o hist\xF3rico de ciclos para resultados e lotes pendentes." });
+      await runtime.runner.runOnce();
+      sendJson(response, 200, { completed: true, note: "Consulte o hist\xF3rico de ciclos para resultados e lotes pendentes." });
     } catch (error) {
       if (error instanceof CycleAlreadyRunningError) {
-        if (isCron) {
-          sendJson(response, 200, { completed: false, skipped: true, note: "Ciclo anterior ainda em andamento; este disparo foi pulado." });
-          return;
-        }
         sendJson(response, 409, { error: "Ciclo j\xE1 em andamento em outra execu\xE7\xE3o" });
         return;
       }
-      const errorCode = error && typeof error === "object" && "code" in error ? ` (${String(error.code)})` : "";
-      console.error(`Falha ao executar a rota no backend: ${error instanceof Error ? error.name : "erro"}${errorCode}`);
+      logBackendError("Falha ao executar a rota no backend", error);
       sendJson(response, 503, { error: "Falha ao acessar o backend. Confira DATABASE_URL e as configura\xE7\xF5es da Vercel." });
     }
   };

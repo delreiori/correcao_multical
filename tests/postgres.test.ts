@@ -149,7 +149,8 @@ test('handler Vercel aplica autenticação de painel/cron e interpreta rewrite',
     const configuration: AppConfig = { mode: 'dry', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', autocabTimeoutMs: 10000, driverMessagesMode: 'off', driverMessageRecipients: null, driverMessagesTop: null, driverMessagePath: '/vehicle/v1/vehicles/message', driverMessageFields: { urgent: true }, connections: [] };
     const runner = new NeonCycleRunner(repository, new CorrectionService(repository, rules, 'dry'), connections);
     let runtimeLoads = 0;
-    const handler = createServerlessHandler(async () => { runtimeLoads++; return { configuration, repository, connections, runner, close: async () => { } }; });
+    // Em teste a resposta espera o trabalho em segundo plano, para conferir o resultado em seguida.
+    const handler = createServerlessHandler(async () => { runtimeLoads++; return { configuration, repository, connections, runner, close: async () => { } }; }, work => work);
     const server = createServer((request, response) => void handler(request, response));
     server.listen(0, '127.0.0.1');
     await new Promise<void>(resolve => server.once('listening', resolve));
@@ -160,18 +161,18 @@ test('handler Vercel aplica autenticação de painel/cron e interpreta rewrite',
         assert.equal((await fetch(base + '/api/handler?route=dashboard')).status, 401);
         assert.equal(runtimeLoads, 0);
         assert.equal((await fetch(base + '/api/cron', { headers: { Authorization: 'Bearer panel-test' } })).status, 401);
-        assert.equal((await fetch(base + '/api/handler?route=cron', { headers: { Authorization: 'Bearer cron-test' } })).status, 200);
+        assert.equal((await fetch(base + '/api/handler?route=cron', { headers: { Authorization: 'Bearer cron-test' } })).status, 202);
         const response = await fetch(base + '/api/handler?route=dashboard&connectionId=main', { headers: { Authorization: 'Bearer panel-test' } });
         assert.equal(response.status, 200);
         const payload = await response.json();
         assert.equal(payload.zones.length, 4);
         assert.equal(payload.changes.length, 2);
         assert.equal((await fetch(base + '/api/cycles', { method: 'POST', headers: { Authorization: 'Bearer panel-test', Origin: 'https://wrong.example' } })).status, 403);
-        // Execução anterior ainda com o lease: o cron é pulado com 200, sem aparecer como falha.
+        // Execução anterior ainda com o lease: o cron responde 202 e o disparo é só pulado, sem novo ciclo.
         await repository.acquireCycleLease('outra-execucao');
-        const skipped = await fetch(base + '/api/handler?route=cron', { headers: { Authorization: 'Bearer cron-test' } });
-        assert.equal(skipped.status, 200);
-        assert.equal((await skipped.json()).skipped, true);
+        const cyclesBefore = (await repository.getDashboard()).cycles.length;
+        assert.equal((await fetch(base + '/api/handler?route=cron', { headers: { Authorization: 'Bearer cron-test' } })).status, 202);
+        assert.equal((await repository.getDashboard()).cycles.length, cyclesBefore);
         assert.equal((await fetch(base + '/api/cycles', { method: 'POST', headers: { Authorization: 'Bearer panel-test' } })).status, 409);
         await repository.releaseCycleLease('outra-execucao');
         delete process.env.CRON_SECRET;

@@ -15,11 +15,5 @@
       "source": "/api/:path*",
       "destination": "/api/handler?route=:path*"
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/cron",
-      "schedule": "* * * * *"
-    }
   ]
 }

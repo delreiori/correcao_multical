@@ -51,7 +51,7 @@ A interface é servida na porta 3001, no loopback por padrão. Em desenvolviment
 
 O padrão é demo localmente e dry na Vercel. Consultas de zonas, veículos, status e GPS já foram verificadas com a chave disponível; nenhum POST real foi enviado. Configure `AUTOCAB_SUBSCRIPTION_KEY` no ambiente do backend ou no `.env` local, nunca no frontend, em JSON de conexões ou no controle de versão. Uma chave deve ter acesso às APIs Vehicle e Booking. Comece com dry para conferir campos, zonas e empresas. Reinicie o processo após mudar configurações. Para aplicar correções reais, defina live explicitamente.
 
-`AUTO_START=true` inicia um ciclo na partida e repete após `CYCLE_INTERVAL_MS` (padrão 60000 ms) contados a partir do fim do ciclo. O agendador impede sobreposição neste processo. `AUTO_START=false` permite executar um ciclo via `POST /api/cycles`, com o token do painel quando configurado. O painel não dispara alterações ao atualizar os logs.
+Na Vercel o agendador é o cron-job.org chamando `GET /api/cron` (veja [o guia de deploy](DEPLOY_VERCEL.md)). `AUTO_START=true` inicia um ciclo na partida e repete após `CYCLE_INTERVAL_MS` (padrão 60000 ms) contados a partir do fim do ciclo. O agendador impede sobreposição neste processo. `AUTO_START=false` permite executar um ciclo via `POST /api/cycles`, com o token do painel quando configurado. O painel não dispara alterações ao atualizar os logs.
 
 ## Endpoints Autocab utilizados
 

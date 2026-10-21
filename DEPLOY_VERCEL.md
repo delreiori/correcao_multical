@@ -15,7 +15,7 @@ Em Settings → Environment Variables configure para Production:
 | `AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA` | Opcional: companyId da Pedra da Gávea |
 | `AUTOCAB_COMPANIES_PATH` | Opcional: caminho do GET de empresas (padrão `/booking/v1/companies`) |
 | `PANEL_TOKEN` | Token aleatório próprio para proteger os logs e entrar no painel |
-| `CRON_SECRET` | Outro token aleatório, exclusivo do agendador |
+| `CRON_SECRET` | Outro token aleatório, exclusivo do agendador (cron-job.org) |
 | `AUTOCAB_TIMEOUT_MS` | Opcional: tempo máximo de cada requisição à Autocab (padrão 10000) |
 | `CRON_REPEAT_INTERVAL_MS` | Opcional: intervalo das passadas extras dentro de cada cron (padrão 20000; 0 desliga) |
 | `DRIVER_MESSAGES_MODE` | Avisos de fila da Arcoverde: `off`, `dry` (padrão, só registra) ou `live` (envia, mesmo com AUTOCAB_MODE=dry) |
@@ -37,19 +37,22 @@ Antes do primeiro ciclo, faça `GET /api/companies` com o mesmo header para list
 
 Abra o painel, informe seu PANEL_TOKEN e confira as zonas e os registros de ciclos. O modo dry faz consultas reais e grava o que seria alterado. Não envia POST de plot.
 
-## Agendamento
+## Agendamento (cron-job.org)
 
-O endpoint do agendador é `GET /api/cron`, com `Authorization: Bearer <CRON_SECRET>`.
+O agendador é o **cron-job.org**; o `vercel.json` não tem cron, para não haver dois agendadores na mesma frota. Configure o job assim:
 
-O projeto está configurado para o plano **Vercel Pro** informado: `vercel.json` agenda `/api/cron` a cada minuto (`* * * * *`). A Vercel envia CRON_SECRET no header Bearer. Configure esse segredo antes do Redeploy. O cron funciona no deploy de produção e não depende do painel aberto.
+| Campo | Valor |
+| --- | --- |
+| URL | `https://<domínio de produção>/api/cron` (de Settings → Domains; não use a URL de um deploy específico) |
+| Método | `GET` |
+| Agendamento | A cada minuto |
+| Header | `Authorization: Bearer <CRON_SECRET>` (o mesmo valor configurado na Vercel) |
 
-Não é necessário um agendador externo. Se trocar para Hobby, ajuste a frequência conforme os limites do plano ou use um agendador externo com HTTPS e header Authorization. Não configure dois agendadores para a mesma frota.
+O endpoint responde **202** em poucos segundos e continua o ciclo em segundo plano (`waitUntil` da Vercel), então o limite de 30 s do cron-job.org não interrompe a correção. O resultado de cada ciclo fica no painel e nos logs da função. Respostas 401 indicam header ausente ou errado; 503 traz no corpo a variável ou o problema do backend.
 
-Cada execução percorre as três empresas e, em cada uma, todos os veículos daquela empresa retornados pelo endpoint de status, sem limite fixo de quantidade. O orçamento do ciclo é de 270 segundos. Somente se esse tempo for atingido, o cursor persistido no Neon permite continuar no próximo ciclo, identificado como Lote parcial. Veículos ausentes da resposta Autocab ou sem dados necessários não podem ser corrigidos. As conexões também são alternadas quando o orçamento não comporta todas. CYCLE_INTERVAL_MS controla o servidor local; não configura o cron da Vercel.
+Cada chamada faz uma passada e, a cada `CRON_REPEAT_INTERVAL_MS` (padrão 20 s), passadas extras enquanto a anterior terminou todas as empresas e a próxima (espera + duração da última) cabe em até 50 s, para não encavalar com o disparo seguinte. Se um disparo encontrar a execução anterior ainda rodando, ele é apenas pulado (log "Cron pulado"). A leitura da frota (zonas, veículos, status e GPS) é feita uma vez por passada e compartilhada entre as empresas; as consultas de zona por GPS rodam 8 em paralelo; em live, os status são relidos uma vez antes dos envios e uma vez depois para confirmar o lote.
 
-O cron da Vercel dispara no máximo uma vez por minuto. Para corrigir mais rápido, cada chamada faz novas passadas a cada `CRON_REPEAT_INTERVAL_MS` (padrão 20 s) somente quando a passada anterior terminou todas as empresas e a próxima (espera + duração da última) termina em até 50 s, para não encavalar com o disparo seguinte. Se um disparo encontrar a execução anterior ainda rodando, responde 200 com `skipped: true` em vez de erro. A leitura da frota (zonas, veículos, status e GPS) é feita uma vez por passada e compartilhada entre as empresas; as consultas de zona por GPS rodam 8 em paralelo; em live, os status são relidos uma vez antes dos envios e uma vez depois para confirmar o lote.
-
-Um lease compartilhado de 360 segundos impede execução concorrente entre instâncias; a função tem duração máxima de 300 segundos. O cron continua sendo disparado a cada minuto; se o ciclo anterior ainda estiver ativo, o novo não começa. HTTP 409 indica que outra execução está ativa. Depois de um encerramento abrupto, os registros pendentes são recuperados pelo próximo ciclo após a expiração do lease. Erros de consulta/envio ficam registrados. A resposta HTTP completed indica que a execução terminou; consulte o resultado de cada ciclo.
+Cada passada percorre as três empresas e, em cada uma, todos os veículos daquela empresa retornados pelo endpoint de status. O orçamento de uma passada é de 270 segundos; se for atingido, o cursor persistido no Neon continua no próximo ciclo (Lote parcial). Um lease compartilhado de 360 segundos impede execução concorrente entre instâncias; a função tem duração máxima de 300 segundos. Depois de um encerramento abrupto, os registros pendentes são recuperados após a expiração do lease. `POST /api/cycles` (com PANEL_TOKEN) roda uma passada e espera o resultado; responde 409 se outra execução estiver ativa. CYCLE_INTERVAL_MS controla só o servidor local.
 
 ## Ativar alterações
 

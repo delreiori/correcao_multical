@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { createNeonRuntime, CycleAlreadyRunningError } from './neon-runtime.ts';
 import { listCompaniesForConnections } from './companies.ts';
 import { CRON_PASS_WINDOW_MS, readCronRepeatIntervalMs } from './execution-limits.ts';
+import { waitUntil } from '@vercel/functions';
 export type NeonRuntime = Awaited<ReturnType<typeof createNeonRuntime>>;
 function hasBearerToken(request: IncomingMessage, token: string) {
     if (!token)
@@ -27,7 +28,37 @@ function hasValidOrigin(request: IncomingMessage) {
         return false;
     }
 }
-export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>) {
+// Só o tipo/código do erro: mensagens do banco podem trazer dados da conexão.
+function logBackendError(context: string, error: unknown) {
+    const errorCode = error && typeof error === 'object' && 'code' in error ? ` (${String(error.code)})` : '';
+    console.error(`${context}: ${error instanceof Error ? error.name : 'erro'}${errorCode}`);
+}
+// Passadas do cron: a primeira e, enquanto couberem antes do próximo disparo, passadas extras a cada
+// CRON_REPEAT_INTERVAL_MS. Nunca rejeita; o resultado fica no histórico de ciclos e no log.
+async function runCronPasses(runtime: NeonRuntime) {
+    const startedAt = Date.now();
+    const repeatIntervalMs = readCronRepeatIntervalMs();
+    let lastPassMs = 0;
+    try {
+        for (let pass = 0; pass === 0 || (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS); pass++) {
+            if (pass > 0)
+                await new Promise(resolve => setTimeout(resolve, repeatIntervalMs));
+            const passStartedAt = Date.now();
+            await runtime.runner.runOnce();
+            lastPassMs = Date.now() - passStartedAt;
+        }
+    }
+    catch (error) {
+        // Execução anterior (ou de outro disparo) ainda ativa: este disparo só é pulado.
+        if (error instanceof CycleAlreadyRunningError)
+            console.log('Cron pulado: ciclo anterior ainda em andamento.');
+        else
+            logBackendError('Falha no ciclo do cron', error);
+    }
+}
+// Na Vercel, waitUntil mantém a função viva após a resposta até o fim das passadas.
+function runOnVercelInBackground(work: Promise<void>) { waitUntil(work); return Promise.resolve(); }
+export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>, runInBackground: (work: Promise<void>) => Promise<void> = runOnVercelInBackground) {
     return async (request: IncomingMessage, response: ServerResponse) => {
         const { path, query } = getRequestPath(request);
         const isCron = path === '/api/cron';
@@ -85,46 +116,21 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
                 sendJson(response, 200, await runtime.repository.getDashboard(query.get('connectionId')));
                 return;
             }
-            const startedAt = Date.now();
-            await runtime.runner.runOnce();
-            let passes = 1;
             if (isCron) {
-                // Passadas extras corrigem mais rápido que o intervalo mínimo do cron. Só repete quando a
-                // anterior terminou todas as empresas e a próxima (espera + duração da última) cabe antes
-                // do próximo disparo, para não encavalar com ele.
-                const repeatIntervalMs = readCronRepeatIntervalMs();
-                let lastPassMs = Date.now() - startedAt;
-                while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS) {
-                    await new Promise(resolve => setTimeout(resolve, repeatIntervalMs));
-                    const passStartedAt = Date.now();
-                    try {
-                        await runtime.runner.runOnce();
-                    }
-                    catch (error) {
-                        // Outra execução assumiu o ciclo entre as passadas: encerra esta sem erro.
-                        if (error instanceof CycleAlreadyRunningError)
-                            break;
-                        throw error;
-                    }
-                    lastPassMs = Date.now() - passStartedAt;
-                    passes++;
-                }
+                // O cron-job.org desiste após 30 s: responde já e segue com as passadas em segundo plano.
+                await runInBackground(runCronPasses(runtime));
+                sendJson(response, 202, { accepted: true, note: 'Ciclo iniciado em segundo plano; consulte o histórico de ciclos no painel.' });
+                return;
             }
-            sendJson(response, 200, { completed: true, passes, note: 'Consulte o histórico de ciclos para resultados e lotes pendentes.' });
+            await runtime.runner.runOnce();
+            sendJson(response, 200, { completed: true, note: 'Consulte o histórico de ciclos para resultados e lotes pendentes.' });
         }
         catch (error) {
             if (error instanceof CycleAlreadyRunningError) {
-                // No cron isso é esperado (a chamada anterior ainda está rodando); não conta como falha.
-                if (isCron) {
-                    sendJson(response, 200, { completed: false, skipped: true, note: 'Ciclo anterior ainda em andamento; este disparo foi pulado.' });
-                    return;
-                }
                 sendJson(response, 409, { error: 'Ciclo já em andamento em outra execução' });
                 return;
             }
-            // Só o tipo/código do erro: mensagens do banco podem trazer dados da conexão.
-            const errorCode = error && typeof error === 'object' && 'code' in error ? ` (${String(error.code)})` : '';
-            console.error(`Falha ao executar a rota no backend: ${error instanceof Error ? error.name : 'erro'}${errorCode}`);
+            logBackendError('Falha ao executar a rota no backend', error);
             sendJson(response, 503, { error: 'Falha ao acessar o backend. Confira DATABASE_URL e as configurações da Vercel.' });
         }
     };
