@@ -15,6 +15,8 @@ export class DemoAutocabClient implements AutocabGateway {
     async findZoneByCoordinates(_latitude: number, _longitude: number, _companyId?: number): Promise<number | null> { return 2; }
     sentMessages: { vehicleId: number; message: string }[] = [];
     async sendDriverMessage(vehicleId: number, message: string) { this.sentMessages.push({ vehicleId, message }); return 200; }
+    ringbacks: number[] = [];
+    async ringbackVehicle(vehicleId: number) { this.ringbacks.push(vehicleId); return 200; }
     async applyVehiclePlot(vehicleId: number, zoneId: number, position: number) {
         const vehicleStatus = this.statuses.find(status => status.vehicleId === vehicleId);
         if (!vehicleStatus)

@@ -263,3 +263,41 @@ test('só os 7 primeiros recebem e só quando a própria posição muda', async 
     assert.equal(gateway.sentMessages.length, 7);
     repository.close();
 });
+test('ringback toca o terminal só de quem recebeu o aviso e está na lista', async () => {
+    const { gateway, setStatuses, statuses } = createArcoverdeQueue();
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'dry', 'live', null, 7, ['A1']);
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
+    await service.runConnection(connection);
+    setStatuses(statuses().map(status => status.vehicleId === 301 ? { ...status, queuePosition: 2 } : status.vehicleId === 302 ? { ...status, queuePosition: 1 } : status));
+    await service.runConnection(connection);
+    assert.equal(gateway.sentMessages.length, 2);
+    assert.deepEqual(gateway.ringbacks, [301]);
+    assert.match(repository.getDashboard().cycles[0].detail ?? '', /ringback 1 ok/);
+    repository.close();
+});
+test('DRIVER_MESSAGES_RINGBACK aceita off, all e lista', () => {
+    const previous = process.env.DRIVER_MESSAGES_RINGBACK;
+    try {
+        delete process.env.DRIVER_MESSAGES_RINGBACK;
+        assert.equal(readConfiguration().driverMessagesRingback, null);
+        process.env.DRIVER_MESSAGES_RINGBACK = 'all';
+        assert.deepEqual(readConfiguration().driverMessagesRingback, []);
+        process.env.DRIVER_MESSAGES_RINGBACK = '5013';
+        assert.deepEqual(readConfiguration().driverMessagesRingback, ['5013']);
+    }
+    finally {
+        if (previous === undefined) delete process.env.DRIVER_MESSAGES_RINGBACK;
+        else process.env.DRIVER_MESSAGES_RINGBACK = previous;
+    }
+});
+test('ringback usa o endpoint RingBack A Vehicle', async () => {
+    let request: { path: string; body: unknown } | null = null;
+    const fakeFetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+        request = { path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) };
+        return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    const client = new AutocabClient('https://autocab-api.azure-api.net', 'key', fakeFetch);
+    assert.equal(await client.ringbackVehicle(5013), 200);
+    assert.deepEqual(request, { path: '/vehicle/v1/vehicles/5013/ringback', body: { VehicleId: 5013 } });
+});

@@ -8,6 +8,7 @@ export interface AutocabGateway {
     findZoneByCoordinates(latitude: number, longitude: number, companyId?: number): Promise<number | null>;
     applyVehiclePlot(vehicleId: number, zoneId: number, position: number): Promise<number>;
     sendDriverMessage(vehicleId: number, message: string): Promise<number>;
+    ringbackVehicle(vehicleId: number): Promise<number>;
 }
 export interface AutocabClientOptions {
     companiesPath?: string;
@@ -152,6 +153,12 @@ export class AutocabClient implements AutocabGateway {
     // "Send Message to Vehicle(s)" da Vehicle API: mensagem da central para o terminal do motorista.
     async sendDriverMessage(vehicleId: number, message: string) {
         const response = await this.sendRequest(this.driverMessagePath, 'POST', { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [], ...this.driverMessageFields });
+        await response.arrayBuffer();
+        return response.status;
+    }
+    // "RingBack A Vehicle": faz o terminal do motorista tocar. Única chamada sonora documentada na Vehicle API.
+    async ringbackVehicle(vehicleId: number) {
+        const response = await this.sendRequest(`/vehicle/v1/vehicles/${vehicleId}/ringback`, 'POST', { VehicleId: vehicleId });
         await response.arrayBuffer();
         return response.status;
     }

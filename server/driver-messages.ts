@@ -48,10 +48,12 @@ export async function notifyQueueChanges(options: {
     recipients?: string[] | null;
     // Quantos primeiros da fila podem receber o aviso.
     topDrivers?: number;
-}): Promise<{ zonesChanged: number; messages: number; failed: number }> {
+    // Ringback após a mensagem, para o terminal tocar: null = desligado, [] = todos, lista = só esses.
+    ringback?: string[] | null;
+}): Promise<{ zonesChanged: number; messages: number; failed: number; ringbacks: number; ringbacksFailed: number }> {
     const { store, gateway, connectionId } = options;
     if (options.messagesMode === 'off' || !store.getZoneQueueSignatures || !store.saveZoneQueueSignature || !store.recordDriverMessage)
-        return { zonesChanged: 0, messages: 0, failed: 0 };
+        return { zonesChanged: 0, messages: 0, failed: 0, ringbacks: 0, ringbacksFailed: 0 };
     // Envio real com DRIVER_MESSAGES_MODE=live, mesmo com as correções em dry, para testar com poucos
     // motoristas; nunca em demo. Fora disso apenas registra.
     const sendForReal = options.messagesMode === 'live' && options.mode !== 'demo';
@@ -59,7 +61,9 @@ export async function notifyQueueChanges(options: {
     const topDrivers = options.topDrivers ?? 7;
     const vehiclesById = new Map(options.vehicles.map(vehicle => [vehicle.id, vehicle]));
     const previousSignatures = await store.getZoneQueueSignatures(connectionId);
-    let zonesChanged = 0, messages = 0, failed = 0;
+    let zonesChanged = 0, messages = 0, failed = 0, ringbacks = 0, ringbacksFailed = 0;
+    const ringback = options.ringback ?? null;
+    const shouldRingback = (driver: { vehicleId: number; callsign: string }) => ringback !== null && (ringback.length === 0 || ringback.includes(driver.callsign) || ringback.includes(String(driver.vehicleId)));
     for (const queue of buildZoneQueues(options.zones, options.statuses, vehiclesById, options.rules)) {
         const signature = queueSignature(queue);
         const previous = previousSignatures.get(queue.zone.id);
@@ -84,6 +88,10 @@ export async function notifyQueueChanges(options: {
                     try {
                         httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
                         outcome = 'sent';
+                        if (shouldRingback(driver)) {
+                            // Falha no ringback não invalida a mensagem já entregue; entra no detalhe do ciclo.
+                            await gateway.ringbackVehicle(driver.vehicleId).then(() => ringbacks++, () => ringbacksFailed++);
+                        }
                     }
                     catch (error) {
                         httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
@@ -96,5 +104,5 @@ export async function notifyQueueChanges(options: {
             }));
         }
     }
-    return { zonesChanged, messages, failed };
+    return { zonesChanged, messages, failed, ringbacks, ringbacksFailed };
 }

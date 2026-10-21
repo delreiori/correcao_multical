@@ -146,7 +146,7 @@ test('handler Vercel aplica autenticação de painel/cron e interpreta rewrite',
     process.env.CRON_REPEAT_INTERVAL_MS = '0';
     const gateway = new DemoAutocabClient();
     const connections = [{ id: 'main', name: 'Main', gateway }];
-    const configuration: AppConfig = { mode: 'dry', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', driverMessagesMode: 'off', driverMessageRecipients: null, driverMessagesTop: 7, driverMessagePath: '/vehicle/v1/vehicles/message', driverMessageFields: { urgent: true }, connections: [] };
+    const configuration: AppConfig = { mode: 'dry', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', driverMessagesMode: 'off', driverMessageRecipients: null, driverMessagesTop: 7, driverMessagesRingback: null, driverMessagePath: '/vehicle/v1/vehicles/message', driverMessageFields: { urgent: true }, connections: [] };
     const runner = new NeonCycleRunner(repository, new CorrectionService(repository, rules, 'dry'), connections);
     let runtimeLoads = 0;
     const handler = createServerlessHandler(async () => { runtimeLoads++; return { configuration, repository, connections, runner, close: async () => { } }; });
