@@ -135,8 +135,8 @@ function readDriverMessagesMode() {
   return mode;
 }
 function readDriverMessageRecipients() {
-  const value = (process.env.DRIVER_MESSAGES_ONLY ?? "5013").trim();
-  if (value === "*")
+  const value = (process.env.DRIVER_MESSAGES_ONLY ?? "").trim();
+  if (value === "" || value === "*")
     return null;
   return value.split(",").map((recipient) => recipient.trim()).filter(Boolean);
 }

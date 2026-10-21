@@ -181,7 +181,7 @@ test('avisos em dry ficam só registrados e outras empresas não recebem', async
     assert.match(logged[0].message, /Você é o 1º\. 1º A2$/);
     repository.close();
 });
-test('em teste só o motorista 5013 recebe, com a fila completa, mesmo com correções em dry', async () => {
+test('com DRIVER_MESSAGES_ONLY=5013 só ele recebe, com a fila completa, mesmo com correções em dry', async () => {
     const { gateway, setStatuses, statuses } = createArcoverdeQueue();
     const baseVehicles = await gateway.listVehicles();
     gateway.listVehicles = async () => baseVehicles.map(vehicle => vehicle.id === 302 ? { ...vehicle, callsign: '5013' } : vehicle);
@@ -195,11 +195,11 @@ test('em teste só o motorista 5013 recebe, com a fila completa, mesmo com corre
     assert.equal((repository.getDashboard().messages ?? []).length, 1);
     repository.close();
 });
-test('DRIVER_MESSAGES_ONLY usa 5013 por padrão e * libera para todos', () => {
+test('avisos vão para todos por padrão e DRIVER_MESSAGES_ONLY restringe', () => {
     const previous = process.env.DRIVER_MESSAGES_ONLY;
     try {
         delete process.env.DRIVER_MESSAGES_ONLY;
-        assert.deepEqual(readConfiguration().driverMessageRecipients, ['5013']);
+        assert.equal(readConfiguration().driverMessageRecipients, null);
         process.env.DRIVER_MESSAGES_ONLY = '*';
         assert.equal(readConfiguration().driverMessageRecipients, null);
         process.env.DRIVER_MESSAGES_ONLY = '5013, 4020';

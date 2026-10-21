@@ -84,10 +84,11 @@ function readDriverMessagesMode(): DriverMessagesMode {
         throw new Error('DRIVER_MESSAGES_MODE deve ser off, dry ou live');
     return mode as DriverMessagesMode;
 }
-// Em teste os avisos vão só para o motorista 5013 (Luciano). DRIVER_MESSAGES_ONLY=* libera para todos.
+// Por padrão todos os motoristas livres da zona recebem. DRIVER_MESSAGES_ONLY restringe a uma lista
+// de callsigns/IDs, útil para testes (ex.: 5013).
 function readDriverMessageRecipients(): string[] | null {
-    const value = (process.env.DRIVER_MESSAGES_ONLY ?? '5013').trim();
-    if (value === '*')
+    const value = (process.env.DRIVER_MESSAGES_ONLY ?? '').trim();
+    if (value === '' || value === '*')
         return null;
     return value.split(',').map(recipient => recipient.trim()).filter(Boolean);
 }
