@@ -445,6 +445,10 @@ var PostgresAuditRepository = class {
   async saveZoneQueueSignature(connectionId, zoneId, signature) {
     await this.database.query('INSERT INTO zone_queue_signatures("connectionId","zoneId",signature,"updatedAt") VALUES($1,$2,$3,$4) ON CONFLICT("connectionId","zoneId") DO UPDATE SET signature=EXCLUDED.signature,"updatedAt"=EXCLUDED."updatedAt"', [connectionId, zoneId, signature, (/* @__PURE__ */ new Date()).toISOString()]);
   }
+  async listDriverMessages(connectionId = null, limit = 1e3) {
+    const result = connectionId ? await this.database.query('SELECT * FROM driver_messages WHERE "connectionId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT $2', [connectionId, limit]) : await this.database.query('SELECT * FROM driver_messages ORDER BY "createdAt" DESC,id DESC LIMIT $1', [limit]);
+    return result.rows.map((row) => ({ ...row, vehicleId: Number(row.vehicleId), zoneId: Number(row.zoneId) }));
+  }
   async recordDriverMessage(message) {
     await this.database.query('INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"httpStatus","createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)', [randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, (/* @__PURE__ */ new Date()).toISOString()]);
   }
@@ -958,7 +962,7 @@ function createServerlessHandler(loadRuntime2) {
       sendJson(response, 403, { error: "Origem n\xE3o permitida" });
       return;
     }
-    const isRead = request.method === "GET" && (path === "/api/status" || path === "/api/dashboard" || path === "/api/companies");
+    const isRead = request.method === "GET" && (path === "/api/status" || path === "/api/dashboard" || path === "/api/companies" || path === "/api/messages");
     const isCycle = request.method === "GET" && isCron || request.method === "POST" && path === "/api/cycles";
     if (!isRead && !isCycle) {
       sendJson(response, 404, { error: "Rota n\xE3o encontrada" });
@@ -984,6 +988,10 @@ function createServerlessHandler(loadRuntime2) {
         } catch (error) {
           sendJson(response, 502, { error: error instanceof Error ? error.message : "Falha ao consultar empresas" });
         }
+        return;
+      }
+      if (path === "/api/messages") {
+        sendJson(response, 200, { messages: await runtime.repository.listDriverMessages(query.get("connectionId")) });
         return;
       }
       if (path === "/api/dashboard") {

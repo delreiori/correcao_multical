@@ -1,4 +1,4 @@
-import type { DashboardData, SystemStatus } from '../shared/types.ts';
+import type { DashboardData, DriverMessageLog, SystemStatus } from '../shared/types.ts';
 async function readResponseBody(response: Response): Promise<unknown> {
     const responseText = await response.text();
     try {
@@ -27,4 +27,8 @@ export function fetchSystemStatus(panelToken: string) { return requestJson<Syste
 export function fetchDashboard(panelToken: string, connectionId: string) {
     const query = connectionId ? '?' + new URLSearchParams({ connectionId }) : '';
     return requestJson<DashboardData>('dashboard' + query, panelToken);
+}
+export function fetchDriverMessages(panelToken: string, connectionId: string) {
+    const query = connectionId ? '?' + new URLSearchParams({ connectionId }) : '';
+    return requestJson<{ messages: DriverMessageLog[] }>('messages' + query, panelToken);
 }

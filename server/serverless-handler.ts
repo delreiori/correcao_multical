@@ -46,7 +46,7 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
             sendJson(response, 403, { error: 'Origem não permitida' });
             return;
         }
-        const isRead = request.method === 'GET' && (path === '/api/status' || path === '/api/dashboard' || path === '/api/companies');
+        const isRead = request.method === 'GET' && (path === '/api/status' || path === '/api/dashboard' || path === '/api/companies' || path === '/api/messages');
         const isCycle = (request.method === 'GET' && isCron) || (request.method === 'POST' && path === '/api/cycles');
         if (!isRead && !isCycle) {
             sendJson(response, 404, { error: 'Rota não encontrada' });
@@ -75,6 +75,10 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
                 catch (error) {
                     sendJson(response, 502, { error: error instanceof Error ? error.message : 'Falha ao consultar empresas' });
                 }
+                return;
+            }
+            if (path === '/api/messages') {
+                sendJson(response, 200, { messages: await runtime.repository.listDriverMessages(query.get('connectionId')) });
                 return;
             }
             if (path === '/api/dashboard') {

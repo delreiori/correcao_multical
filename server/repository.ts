@@ -74,6 +74,11 @@ export class AuditRepository {
     saveZoneQueueSignature(connectionId: string, zoneId: number, signature: string) {
         this.database.prepare('INSERT INTO zone_queue_signatures VALUES(?,?,?,?) ON CONFLICT(connectionId,zoneId) DO UPDATE SET signature=excluded.signature,updatedAt=excluded.updatedAt').run(connectionId, zoneId, signature, new Date().toISOString());
     }
+    listDriverMessages(connectionId: string | null = null, limit = 1000) {
+        const filter = connectionId ? ' WHERE connectionId=?' : '';
+        const parameters = connectionId ? [connectionId, limit] : [limit];
+        return this.database.prepare('SELECT * FROM driver_messages' + filter + ' ORDER BY createdAt DESC,rowid DESC LIMIT ?').all(...parameters) as unknown as DriverMessageLog[];
+    }
     recordDriverMessage(message: NewDriverMessage) {
         this.database.prepare('INSERT INTO driver_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, new Date().toISOString());
     }

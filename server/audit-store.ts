@@ -15,4 +15,5 @@ export interface AuditStore {
     getZoneQueueSignatures?(connectionId: string): Awaitable<Map<number, string>>;
     saveZoneQueueSignature?(connectionId: string, zoneId: number, signature: string): Awaitable<void>;
     recordDriverMessage?(message: NewDriverMessage): Awaitable<void>;
+    listDriverMessages?(connectionId?: string | null, limit?: number): Awaitable<DriverMessageLog[]>;
 }

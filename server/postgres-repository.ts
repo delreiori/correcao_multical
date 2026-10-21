@@ -76,6 +76,12 @@ export class PostgresAuditRepository implements AuditStore {
     async saveZoneQueueSignature(connectionId: string, zoneId: number, signature: string) {
         await this.database.query('INSERT INTO zone_queue_signatures("connectionId","zoneId",signature,"updatedAt") VALUES($1,$2,$3,$4) ON CONFLICT("connectionId","zoneId") DO UPDATE SET signature=EXCLUDED.signature,"updatedAt"=EXCLUDED."updatedAt"', [connectionId, zoneId, signature, new Date().toISOString()]);
     }
+    async listDriverMessages(connectionId: string | null = null, limit = 1000) {
+        const result = connectionId
+            ? await this.database.query('SELECT * FROM driver_messages WHERE "connectionId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT $2', [connectionId, limit])
+            : await this.database.query('SELECT * FROM driver_messages ORDER BY "createdAt" DESC,id DESC LIMIT $1', [limit]);
+        return result.rows.map(row => ({ ...row, vehicleId: Number(row.vehicleId), zoneId: Number(row.zoneId) })) as unknown as DriverMessageLog[];
+    }
     async recordDriverMessage(message: NewDriverMessage) {
         await this.database.query('INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"httpStatus","createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)', [randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, new Date().toISOString()]);
     }

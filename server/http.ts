@@ -51,6 +51,10 @@ export function createApplication(config: AppConfig, repository: AuditStore, sch
             response.status(502).json({ error: error instanceof Error ? error.message : 'Falha ao consultar empresas' });
         }
     });
+    application.get('/api/messages', async (request, response) => {
+        const connectionId = typeof request.query.connectionId === 'string' ? request.query.connectionId : null;
+        response.json({ messages: await repository.listDriverMessages?.(connectionId) ?? [] });
+    });
     application.get('/api/dashboard', async (request, response) => {
         const connectionId = typeof request.query.connectionId === 'string' ? request.query.connectionId : null;
         response.json(await repository.getDashboard(connectionId));
