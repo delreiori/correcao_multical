@@ -235,3 +235,31 @@ test('campos de urgência da mensagem podem ser trocados por AUTOCAB_DRIVER_MESS
         else process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS = previous;
     }
 });
+test('só os 7 primeiros recebem e só quando a própria posição muda', async () => {
+    const gateway = new DemoAutocabClient();
+    const ids = Array.from({ length: 9 }, (_, index) => 401 + index);
+    let order = [...ids];
+    gateway.listZones = async () => [{ id: 11, name: 'Praia', companyId: 1 }];
+    gateway.listVehicles = async () => ids.map(id => ({ id, callsign: 'C' + id, companyId: 1 }));
+    gateway.listVehicleStatuses = async () => order.map((vehicleId, index) => ({ vehicleId, zoneId: 11, queuePosition: index + 1, status: 'Available', hasPenalty: false }));
+    gateway.listGpsPositions = async () => [];
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'live', 'live');
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
+    await service.runConnection(connection);
+    // Troca só o 8º com o 9º: ninguém entre os 7 primeiros mudou.
+    order = [...ids.slice(0, 7), ids[8], ids[7]];
+    await service.runConnection(connection);
+    assert.equal(gateway.sentMessages.length, 0);
+    // O 3º passa a 2º e o 2º a 3º; o 1º e os demais continuam no lugar.
+    order = [order[0], order[2], order[1], ...order.slice(3)];
+    await service.runConnection(connection);
+    assert.deepEqual(gateway.sentMessages.map(message => message.vehicleId).sort(), [402, 403]);
+    assert.match(gateway.sentMessages[0].message, /1º C401 \| 2º C403 \| 3º C402 \| 4º C404 \| 5º C405 \| 6º C406 \| 7º C407 \| \+2$/);
+    // O 1º sai da zona: todos sobem e os 7 primeiros novos recebem (o 8º entra no grupo).
+    order = order.slice(1);
+    gateway.sentMessages.length = 0;
+    await service.runConnection(connection);
+    assert.equal(gateway.sentMessages.length, 7);
+    repository.close();
+});

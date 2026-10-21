@@ -17,12 +17,13 @@ Aplicação com Node.js 24+, TypeScript, React e PostgreSQL/Neon na Vercel; SQLi
 
 ## Avisos de fila aos motoristas (Arcoverde)
 
-Na Arcoverde, sempre que a ordem da fila de uma zona muda (pelo sistema ou não), cada motorista **livre dentro daquela zona** recebe uma mensagem da central com a fila atualizada e a própria posição, por exemplo: `ARCOVERDE - Fila Praia atualizada. Você é o 2º. 1º A2 | 2º A1 | 3º A7`. Regras:
+Na Arcoverde, quando a posição de um dos **7 primeiros motoristas livres** da fila de uma zona muda (pelo sistema ou não), esse motorista recebe uma mensagem da central com a fila atualizada e a própria posição, por exemplo: `ARCOVERDE - Fila Praia atualizada. Você é o 2º. 1º A2 | 2º A1 | 3º A7`. Regras:
 
 - Motorista ocupado (já trabalhando) não recebe e não aparece na fila.
 - Só recebe quem está na zona que mudou; zonas protegidas (NAK, FORA DE AREA) não geram aviso.
 - Fila igual à do último aviso não repete a mensagem. Na primeira leitura de cada zona a fila só é guardada.
-- O texto lista até 10 motoristas e resume o restante como `+N`.
+- Só os 7 primeiros da fila podem receber (`DRIVER_MESSAGES_TOP`), e só quem teve a própria posição alterada, incluindo quem acabou de entrar entre os 7. Mudanças do 8º em diante não geram aviso.
+- O texto lista os 7 primeiros e resume o restante como `+N`.
 
 Todos os motoristas livres da zona recebem os avisos. Para testar com poucos motoristas, `DRIVER_MESSAGES_ONLY` restringe a uma lista de callsigns ou IDs separados por vírgula (ex.: `5013`); a fila listada na mensagem continua completa.
 

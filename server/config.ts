@@ -26,6 +26,8 @@ export interface AppConfig {
     driverMessageFields: Record<string, unknown>;
     // Callsigns ou IDs que recebem os avisos; null = todos os motoristas livres da zona.
     driverMessageRecipients: string[] | null;
+    // Só os N primeiros da fila recebem o aviso quando a posição deles muda.
+    driverMessagesTop: number;
     connections: ConnectionConfig[];
 }
 // Empresas da Multicall corrigidas por padrão. Todas usam a mesma Subscription Key; o rastreio
@@ -128,5 +130,5 @@ export function readConfiguration(): AppConfig {
         protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA').split(',').map(name => name.trim()).filter(Boolean),
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
-        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageFields: readDriverMessageFields(), driverMessageRecipients: readDriverMessageRecipients(), connections: readConnections() };
+        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageFields: readDriverMessageFields(), driverMessageRecipients: readDriverMessageRecipients(), driverMessagesTop: readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 7), connections: readConnections() };
 }

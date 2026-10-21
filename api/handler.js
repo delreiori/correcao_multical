@@ -184,6 +184,7 @@ function readConfiguration() {
     driverMessagePath: readDriverMessagePath(),
     driverMessageFields: readDriverMessageFields(),
     driverMessageRecipients: readDriverMessageRecipients(),
+    driverMessagesTop: readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 7),
     connections: readConnections()
   };
 }
@@ -514,7 +515,6 @@ function describeChange(status, currentZone, targetZone, callsign, gpsPosition, 
 }
 
 // server/driver-messages.ts
-var LISTED_DRIVERS = 10;
 var MESSAGE_CONCURRENCY = 8;
 function buildZoneQueues(zones, statuses, vehiclesById, rules) {
   return zones.filter((zone) => !isProtectedZone(zone, rules)).map((zone) => {
@@ -525,9 +525,9 @@ function buildZoneQueues(zones, statuses, vehiclesById, rules) {
 function queueSignature(queue) {
   return queue.drivers.map((driver) => driver.vehicleId).join(",");
 }
-function buildQueueMessage(companyName, queue, recipientIndex) {
-  const listed = queue.drivers.slice(0, LISTED_DRIVERS).map((driver, index) => `${index + 1}\xBA ${driver.callsign}`).join(" | ");
-  const remaining = queue.drivers.length - LISTED_DRIVERS;
+function buildQueueMessage(companyName, queue, recipientIndex, listedDrivers = 7) {
+  const listed = queue.drivers.slice(0, listedDrivers).map((driver, index) => `${index + 1}\xBA ${driver.callsign}`).join(" | ");
+  const remaining = queue.drivers.length - listedDrivers;
   return `${companyName.toUpperCase()} - Fila ${queue.zone.name} atualizada. Voc\xEA \xE9 o ${recipientIndex + 1}\xBA. ${listed}${remaining > 0 ? ` | +${remaining}` : ""}`;
 }
 async function notifyQueueChanges(options) {
@@ -536,6 +536,7 @@ async function notifyQueueChanges(options) {
     return { zonesChanged: 0, messages: 0, failed: 0 };
   const sendForReal = options.messagesMode === "live" && options.mode !== "demo";
   const allowed = options.recipients ? new Set(options.recipients) : null;
+  const topDrivers = options.topDrivers ?? 7;
   const vehiclesById = new Map(options.vehicles.map((vehicle) => [vehicle.id, vehicle]));
   const previousSignatures = await store.getZoneQueueSignatures(connectionId);
   let zonesChanged = 0, messages = 0, failed = 0;
@@ -547,13 +548,14 @@ async function notifyQueueChanges(options) {
     await store.saveZoneQueueSignature(connectionId, queue.zone.id, signature);
     if (previous === void 0 || queue.drivers.length === 0)
       continue;
+    const previousPositions = new Map(previous.split(",").filter(Boolean).map((vehicleId, index) => [Number(vehicleId), index]));
+    const recipients = queue.drivers.slice(0, topDrivers).map((driver, queuePosition) => ({ driver, queuePosition })).filter(({ driver, queuePosition }) => previousPositions.get(driver.vehicleId) !== queuePosition).filter(({ driver }) => !allowed || allowed.has(driver.callsign) || allowed.has(String(driver.vehicleId)));
+    if (recipients.length === 0)
+      continue;
     zonesChanged++;
-    for (let start = 0; start < queue.drivers.length; start += MESSAGE_CONCURRENCY) {
-      await Promise.all(queue.drivers.slice(start, start + MESSAGE_CONCURRENCY).map(async (driver, offset) => {
-        if (allowed && !allowed.has(driver.callsign) && !allowed.has(String(driver.vehicleId)))
-          return;
-        const queuePosition = start + offset;
-        const message = buildQueueMessage(options.companyName, queue, queuePosition);
+    for (let start = 0; start < recipients.length; start += MESSAGE_CONCURRENCY) {
+      await Promise.all(recipients.slice(start, start + MESSAGE_CONCURRENCY).map(async ({ driver, queuePosition }) => {
+        const message = buildQueueMessage(options.companyName, queue, queuePosition, topDrivers);
         let outcome = "simulated", httpStatus = null;
         if (sendForReal) {
           try {
@@ -604,12 +606,14 @@ var CorrectionService = class {
   resolvedCompanyIds = /* @__PURE__ */ new Map();
   driverMessagesMode;
   driverMessageRecipients;
-  constructor(repository, rules, mode, driverMessagesMode = "off", driverMessageRecipients = null) {
+  driverMessagesTop;
+  constructor(repository, rules, mode, driverMessagesMode = "off", driverMessageRecipients = null, driverMessagesTop = 7) {
     this.repository = repository;
     this.rules = rules;
     this.mode = mode;
     this.driverMessagesMode = driverMessagesMode;
     this.driverMessageRecipients = driverMessageRecipients;
+    this.driverMessagesTop = driverMessagesTop;
   }
   async loadSnapshot(gateway) {
     const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
@@ -790,7 +794,7 @@ var CorrectionService = class {
       }
       if (connection.driverMessages && connection.companyId !== void 0) {
         try {
-          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients });
+          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
           if (result.messages > 0)
             this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
         } catch (error) {
@@ -909,7 +913,7 @@ async function createNeonRuntime() {
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
     return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
   });
-  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients);
+  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop);
   const runner = new NeonCycleRunner(repository, service, connections);
   return { configuration, repository, connections, runner, close: () => pool.end() };
 }
