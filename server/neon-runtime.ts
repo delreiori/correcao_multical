@@ -71,10 +71,34 @@ export class NeonCycleRunner implements CycleRuntime {
         }
     }
 }
+// Aceita a connection string como costuma ser colada: com espaços, aspas, "DATABASE_URL=" na frente,
+// colchetes do modelo do Supabase em volta da senha ou senha com caracteres especiais sem codificar.
+// Nunca inclui o valor na mensagem de erro, porque ele contém a senha.
+export function parseDatabaseUrl(rawValue: string): URL {
+    let value = rawValue.trim().replace(/^DATABASE_URL\s*=\s*/, '').trim().replace(/^(['"])(.*)\1$/, '$2').trim();
+    const match = /^(postgres(?:ql)?):\/\/([^:@/]*)(?::(.*))?@([^@/?#]+)(\/[^?#]*)?(\?[^#]*)?$/.exec(value);
+    if (!match)
+        throw new Error('DATABASE_URL inválida: use o formato postgresql://usuario:senha@host:porta/postgres');
+    const [, protocol, user, rawPassword = '', host, path = '/postgres', query = ''] = match;
+    if (/YOUR-PASSWORD/i.test(rawPassword))
+        throw new Error('DATABASE_URL ainda tem [YOUR-PASSWORD]; troque pela senha do banco');
+    let password = rawPassword.startsWith('[') && rawPassword.endsWith(']') ? rawPassword.slice(1, -1) : rawPassword;
+    try {
+        password = decodeURIComponent(password);
+    }
+    catch {
+        // "%" solto na senha: usa o texto como está.
+    }
+    value = `${protocol}://${encodeURIComponent(decodeURIComponent(user))}:${encodeURIComponent(password)}@${host}${path}${query}`;
+    try {
+        return new URL(value);
+    }
+    catch {
+        throw new Error('DATABASE_URL inválida: confira host e porta (ex.: aws-0-<região>.pooler.supabase.com:5432)');
+    }
+}
 function createDatabasePool(databaseUrl: string) {
-    const parsedUrl = new URL(databaseUrl);
-    if (!['postgres:', 'postgresql:'].includes(parsedUrl.protocol))
-        throw new Error('DATABASE_URL deve ser PostgreSQL');
+    const parsedUrl = parseDatabaseUrl(databaseUrl);
     // Keep TLS certificate verification active, including when the provider gives sslmode=require.
     for (const parameter of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert'])
         parsedUrl.searchParams.delete(parameter);

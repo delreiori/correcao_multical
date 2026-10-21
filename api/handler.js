@@ -918,10 +918,28 @@ var NeonCycleRunner = class {
     }
   }
 };
+function parseDatabaseUrl(rawValue) {
+  let value = rawValue.trim().replace(/^DATABASE_URL\s*=\s*/, "").trim().replace(/^(['"])(.*)\1$/, "$2").trim();
+  const match = /^(postgres(?:ql)?):\/\/([^:@/]*)(?::(.*))?@([^@/?#]+)(\/[^?#]*)?(\?[^#]*)?$/.exec(value);
+  if (!match)
+    throw new Error("DATABASE_URL inv\xE1lida: use o formato postgresql://usuario:senha@host:porta/postgres");
+  const [, protocol, user, rawPassword = "", host, path = "/postgres", query = ""] = match;
+  if (/YOUR-PASSWORD/i.test(rawPassword))
+    throw new Error("DATABASE_URL ainda tem [YOUR-PASSWORD]; troque pela senha do banco");
+  let password = rawPassword.startsWith("[") && rawPassword.endsWith("]") ? rawPassword.slice(1, -1) : rawPassword;
+  try {
+    password = decodeURIComponent(password);
+  } catch {
+  }
+  value = `${protocol}://${encodeURIComponent(decodeURIComponent(user))}:${encodeURIComponent(password)}@${host}${path}${query}`;
+  try {
+    return new URL(value);
+  } catch {
+    throw new Error("DATABASE_URL inv\xE1lida: confira host e porta (ex.: aws-0-<regi\xE3o>.pooler.supabase.com:5432)");
+  }
+}
 function createDatabasePool(databaseUrl) {
-  const parsedUrl = new URL(databaseUrl);
-  if (!["postgres:", "postgresql:"].includes(parsedUrl.protocol))
-    throw new Error("DATABASE_URL deve ser PostgreSQL");
+  const parsedUrl = parseDatabaseUrl(databaseUrl);
   for (const parameter of ["sslmode", "sslcert", "sslkey", "sslrootcert"])
     parsedUrl.searchParams.delete(parameter);
   return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true, ca: databaseCertificateAuthorities(parsedUrl.hostname) }, max: 3, connectionTimeoutMillis: 8e3, query_timeout: 8e3, idleTimeoutMillis: 1e4 });

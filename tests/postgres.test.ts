@@ -243,3 +243,19 @@ test('TLS do banco aceita a raiz do Supabase só em hosts do Supabase, sem desli
     assert.ok(!databaseCertificateAuthorities('ep-x.sa-east-1.aws.neon.tech').includes(supabaseRootCertificate));
     assert.ok(!databaseCertificateAuthorities('supabase.com.attacker.example').includes(supabaseRootCertificate));
 });
+test('DATABASE_URL colada com colchetes, aspas ou senha com caracteres especiais é aceita', async () => {
+    const { parseDatabaseUrl } = await import('../server/neon-runtime.ts');
+    const host = 'aws-0-sa-east-1.pooler.supabase.com:5432';
+    const brackets = parseDatabaseUrl(`postgresql://postgres.abc123:[S3nha]@${host}/postgres`);
+    assert.equal(brackets.password, 'S3nha');
+    assert.equal(brackets.username, 'postgres.abc123');
+    assert.equal(brackets.hostname, 'aws-0-sa-east-1.pooler.supabase.com');
+    const special = parseDatabaseUrl(`  "postgresql://postgres.abc123:p@ss#w/rd?1@${host}/postgres"  `);
+    assert.equal(decodeURIComponent(special.password), 'p@ss#w/rd?1');
+    assert.equal(special.pathname, '/postgres');
+    const prefixed = parseDatabaseUrl(`DATABASE_URL=postgresql://postgres.abc123:S3nha@${host}/postgres?sslmode=require`);
+    assert.equal(prefixed.searchParams.get('sslmode'), 'require');
+    assert.equal(decodeURIComponent(parseDatabaseUrl(`postgresql://u:a%40b@${host}/postgres`).password), 'a@b');
+    assert.throws(() => parseDatabaseUrl(`postgresql://postgres.abc123:[YOUR-PASSWORD]@${host}/postgres`), /YOUR-PASSWORD/);
+    assert.throws(() => parseDatabaseUrl('https://exemplo.com'), error => error instanceof Error && /formato/.test(error.message) && !error.message.includes('exemplo'));
+});
