@@ -87,23 +87,44 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>)
             }
             const startedAt = Date.now();
             await runtime.runner.runOnce();
+            let passes = 1;
             if (isCron) {
-                // Passadas extras corrigem mais rápido que o intervalo mínimo do cron; só repete
-                // quando a passada anterior terminou todas as empresas e ainda cabe outra no minuto.
+                // Passadas extras corrigem mais rápido que o intervalo mínimo do cron. Só repete quando a
+                // anterior terminou todas as empresas e a próxima (espera + duração da última) cabe antes
+                // do próximo disparo, para não encavalar com ele.
                 const repeatIntervalMs = readCronRepeatIntervalMs();
-                while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs < CRON_PASS_WINDOW_MS) {
+                let lastPassMs = Date.now() - startedAt;
+                while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS) {
                     await new Promise(resolve => setTimeout(resolve, repeatIntervalMs));
-                    await runtime.runner.runOnce();
+                    const passStartedAt = Date.now();
+                    try {
+                        await runtime.runner.runOnce();
+                    }
+                    catch (error) {
+                        // Outra execução assumiu o ciclo entre as passadas: encerra esta sem erro.
+                        if (error instanceof CycleAlreadyRunningError)
+                            break;
+                        throw error;
+                    }
+                    lastPassMs = Date.now() - passStartedAt;
+                    passes++;
                 }
             }
-            sendJson(response, 200, { completed: true, note: 'Consulte o histórico de ciclos para resultados e lotes pendentes.' });
+            sendJson(response, 200, { completed: true, passes, note: 'Consulte o histórico de ciclos para resultados e lotes pendentes.' });
         }
         catch (error) {
             if (error instanceof CycleAlreadyRunningError) {
+                // No cron isso é esperado (a chamada anterior ainda está rodando); não conta como falha.
+                if (isCron) {
+                    sendJson(response, 200, { completed: false, skipped: true, note: 'Ciclo anterior ainda em andamento; este disparo foi pulado.' });
+                    return;
+                }
                 sendJson(response, 409, { error: 'Ciclo já em andamento em outra execução' });
                 return;
             }
-            console.error('Falha ao executar a rota no backend');
+            // Só o tipo/código do erro: mensagens do banco podem trazer dados da conexão.
+            const errorCode = error && typeof error === 'object' && 'code' in error ? ` (${String(error.code)})` : '';
+            console.error(`Falha ao executar a rota no backend: ${error instanceof Error ? error.name : 'erro'}${errorCode}`);
             sendJson(response, 503, { error: 'Falha ao acessar o backend. Confira DATABASE_URL e as configurações da Vercel.' });
         }
     };

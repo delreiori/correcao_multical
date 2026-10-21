@@ -21,6 +21,8 @@ export interface AppConfig {
     protectedZoneNames: string[];
     outsideZoneName: string;
     companiesPath: string;
+    // Tempo máximo de cada requisição à Autocab.
+    autocabTimeoutMs: number;
     driverMessagesMode: DriverMessagesMode;
     driverMessagePath: string;
     driverMessageFields: Record<string, unknown>;
@@ -130,5 +132,6 @@ export function readConfiguration(): AppConfig {
         protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA').split(',').map(name => name.trim()).filter(Boolean),
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
+        autocabTimeoutMs: readPositiveInteger(process.env.AUTOCAB_TIMEOUT_MS, 10000),
         driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageFields: readDriverMessageFields(), driverMessageRecipients: readDriverMessageRecipients(), driverMessagesTop: process.env.DRIVER_MESSAGES_TOP?.trim() ? readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 1) : null, connections: readConnections() };
 }

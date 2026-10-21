@@ -255,6 +255,8 @@ export class CorrectionService {
             return outcome;
         }
         catch (error) {
+            // Mensagens próprias, sem credenciais; aparecem no log da Vercel para diagnosticar quedas.
+            console.error(`Ciclo ${connection.id} falhou: ${safeErrorMessage(error)}`);
             await this.repository.finishCycle(cycleId, 'failed', this.inspectedCount, planned, safeErrorMessage(error));
             return 'failed';
         }

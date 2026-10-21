@@ -69,7 +69,7 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 // server/execution-limits.ts
 var CYCLE_TIME_BUDGET_MS = 27e4;
 var CYCLE_LEASE_SECONDS = 360;
-var CRON_PASS_WINDOW_MS = 45e3;
+var CRON_PASS_WINDOW_MS = 5e4;
 function readCronRepeatIntervalMs(value = process.env.CRON_REPEAT_INTERVAL_MS) {
   const interval = Number(value ?? 2e4);
   return Number.isFinite(interval) && interval >= 0 ? interval : 2e4;
@@ -180,6 +180,7 @@ function readConfiguration() {
     protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA").split(",").map((name) => name.trim()).filter(Boolean),
     outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? "FORA DE AREA",
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
+    autocabTimeoutMs: readPositiveInteger(process.env.AUTOCAB_TIMEOUT_MS, 1e4),
     driverMessagesMode: readDriverMessagesMode(),
     driverMessagePath: readDriverMessagePath(),
     driverMessageFields: readDriverMessageFields(),
@@ -807,6 +808,7 @@ var CorrectionService = class {
       await this.repository.finishCycle(cycleId, outcome, inspected, planned, this.notes.join(". ") || null);
       return outcome;
     } catch (error) {
+      console.error(`Ciclo ${connection.id} falhou: ${safeErrorMessage(error)}`);
       await this.repository.finishCycle(cycleId, "failed", this.inspectedCount, planned, safeErrorMessage(error));
       return "failed";
     }
@@ -910,7 +912,7 @@ async function createNeonRuntime() {
   }
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
-    const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
+    const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
     return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
   });
   const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop);
@@ -1021,20 +1023,36 @@ function createServerlessHandler(loadRuntime2) {
       }
       const startedAt = Date.now();
       await runtime.runner.runOnce();
+      let passes = 1;
       if (isCron) {
         const repeatIntervalMs = readCronRepeatIntervalMs();
-        while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs < CRON_PASS_WINDOW_MS) {
+        let lastPassMs = Date.now() - startedAt;
+        while (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS) {
           await new Promise((resolve) => setTimeout(resolve, repeatIntervalMs));
-          await runtime.runner.runOnce();
+          const passStartedAt = Date.now();
+          try {
+            await runtime.runner.runOnce();
+          } catch (error) {
+            if (error instanceof CycleAlreadyRunningError)
+              break;
+            throw error;
+          }
+          lastPassMs = Date.now() - passStartedAt;
+          passes++;
         }
       }
-      sendJson(response, 200, { completed: true, note: "Consulte o hist\xF3rico de ciclos para resultados e lotes pendentes." });
+      sendJson(response, 200, { completed: true, passes, note: "Consulte o hist\xF3rico de ciclos para resultados e lotes pendentes." });
     } catch (error) {
       if (error instanceof CycleAlreadyRunningError) {
+        if (isCron) {
+          sendJson(response, 200, { completed: false, skipped: true, note: "Ciclo anterior ainda em andamento; este disparo foi pulado." });
+          return;
+        }
         sendJson(response, 409, { error: "Ciclo j\xE1 em andamento em outra execu\xE7\xE3o" });
         return;
       }
-      console.error("Falha ao executar a rota no backend");
+      const errorCode = error && typeof error === "object" && "code" in error ? ` (${String(error.code)})` : "";
+      console.error(`Falha ao executar a rota no backend: ${error instanceof Error ? error.name : "erro"}${errorCode}`);
       sendJson(response, 503, { error: "Falha ao acessar o backend. Confira DATABASE_URL e as configura\xE7\xF5es da Vercel." });
     }
   };
