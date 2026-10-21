@@ -23,6 +23,8 @@ export interface AppConfig {
     companiesPath: string;
     driverMessagesMode: DriverMessagesMode;
     driverMessagePath: string;
+    // Callsigns ou IDs que recebem os avisos; null = todos os motoristas livres da zona.
+    driverMessageRecipients: string[] | null;
     connections: ConnectionConfig[];
 }
 // Empresas da Multicall corrigidas por padrão. Todas usam a mesma Subscription Key; o rastreio
@@ -81,6 +83,13 @@ function readDriverMessagesMode(): DriverMessagesMode {
         throw new Error('DRIVER_MESSAGES_MODE deve ser off, dry ou live');
     return mode as DriverMessagesMode;
 }
+// Em teste os avisos vão só para o motorista 5013 (Luciano). DRIVER_MESSAGES_ONLY=* libera para todos.
+function readDriverMessageRecipients(): string[] | null {
+    const value = (process.env.DRIVER_MESSAGES_ONLY ?? '5013').trim();
+    if (value === '*')
+        return null;
+    return value.split(',').map(recipient => recipient.trim()).filter(Boolean);
+}
 function readDriverMessagePath() {
     const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || '/vehicle/v1/vehicles/{vehicleId}/message';
     if (!path.startsWith('/') || !path.includes('{vehicleId}'))
@@ -100,5 +109,5 @@ export function readConfiguration(): AppConfig {
         protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA').split(',').map(name => name.trim()).filter(Boolean),
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
-        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), connections: readConnections() };
+        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageRecipients: readDriverMessageRecipients(), connections: readConnections() };
 }

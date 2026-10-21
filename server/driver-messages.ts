@@ -44,12 +44,16 @@ export async function notifyQueueChanges(options: {
     statuses: VehicleStatus[];
     vehicles: Vehicle[];
     rules: ZoneRules;
+    // Callsigns ou IDs autorizados a receber; null = todos. A fila listada na mensagem continua completa.
+    recipients?: string[] | null;
 }): Promise<{ zonesChanged: number; messages: number; failed: number }> {
     const { store, gateway, connectionId } = options;
     if (options.messagesMode === 'off' || !store.getZoneQueueSignatures || !store.saveZoneQueueSignature || !store.recordDriverMessage)
         return { zonesChanged: 0, messages: 0, failed: 0 };
-    // Envio real só com AUTOCAB_MODE=live e DRIVER_MESSAGES_MODE=live; senão apenas registra.
-    const sendForReal = options.messagesMode === 'live' && options.mode === 'live';
+    // Envio real com DRIVER_MESSAGES_MODE=live, mesmo com as correções em dry, para testar com poucos
+    // motoristas; nunca em demo. Fora disso apenas registra.
+    const sendForReal = options.messagesMode === 'live' && options.mode !== 'demo';
+    const allowed = options.recipients ? new Set(options.recipients) : null;
     const vehiclesById = new Map(options.vehicles.map(vehicle => [vehicle.id, vehicle]));
     const previousSignatures = await store.getZoneQueueSignatures(connectionId);
     let zonesChanged = 0, messages = 0, failed = 0;
@@ -64,6 +68,8 @@ export async function notifyQueueChanges(options: {
         zonesChanged++;
         for (let start = 0; start < queue.drivers.length; start += MESSAGE_CONCURRENCY) {
             await Promise.all(queue.drivers.slice(start, start + MESSAGE_CONCURRENCY).map(async (driver, offset) => {
+                if (allowed && !allowed.has(driver.callsign) && !allowed.has(String(driver.vehicleId)))
+                    return;
                 const queuePosition = start + offset;
                 const message = buildQueueMessage(options.companyName, queue, queuePosition);
                 let outcome: DriverMessageOutcome = 'simulated', httpStatus: number | null = null;

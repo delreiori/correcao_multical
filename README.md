@@ -24,7 +24,9 @@ Na Arcoverde, sempre que a ordem da fila de uma zona muda (pelo sistema ou não)
 - Fila igual à do último aviso não repete a mensagem. Na primeira leitura de cada zona a fila só é guardada.
 - O texto lista até 10 motoristas e resume o restante como `+N`.
 
-`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. Para enviar, use `DRIVER_MESSAGES_MODE=live` com `AUTOCAB_MODE=live`. O envio é um POST em `AUTOCAB_DRIVER_MESSAGE_PATH` (padrão `/vehicle/v1/vehicles/{vehicleId}/message`) com corpo `{ vehicleId, message }`; confira esse caminho com a Autocab antes de ativar. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
+Em teste, os avisos vão **só para o motorista 5013 (Luciano)**; a fila listada na mensagem continua completa. `DRIVER_MESSAGES_ONLY` muda a lista (callsigns ou IDs separados por vírgula) e `DRIVER_MESSAGES_ONLY=*` libera para todos os motoristas livres da zona.
+
+`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. `DRIVER_MESSAGES_MODE=live` envia de verdade, mesmo com `AUTOCAB_MODE=dry`, para testar a mensagem sem mover carros. O envio é um POST em `AUTOCAB_DRIVER_MESSAGE_PATH` (padrão `/vehicle/v1/vehicles/{vehicleId}/message`) com corpo `{ vehicleId, message }`; confira esse caminho com a Autocab antes de ativar. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
 
 ## Instalação e execução
 

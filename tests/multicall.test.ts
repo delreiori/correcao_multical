@@ -164,10 +164,10 @@ test('Arcoverde avisa só os motoristas livres da zona cuja fila mudou, com a or
     assert.equal(gateway.sentMessages.length, 2, 'fila igual não repete a mensagem');
     repository.close();
 });
-test('avisos ficam só registrados fora do modo live e outras empresas não recebem', async () => {
+test('avisos em dry ficam só registrados e outras empresas não recebem', async () => {
     const { gateway, setStatuses, statuses } = createArcoverdeQueue();
     const repository = new AuditRepository(':memory:');
-    const service = new CorrectionService(repository, rules, 'dry', 'live');
+    const service = new CorrectionService(repository, rules, 'dry', 'dry');
     const arcoverde = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
     const saoConrado = { id: 'sao-conrado', name: 'São Conrado', companyId: 1, gateway };
     await service.runConnection(arcoverde);
@@ -180,4 +180,33 @@ test('avisos ficam só registrados fora do modo live e outras empresas não rece
     assert.deepEqual(logged.map(message => [message.connectionId, message.callsign, message.outcome]), [['arcoverde', 'A2', 'simulated']]);
     assert.match(logged[0].message, /Você é o 1º\. 1º A2$/);
     repository.close();
+});
+test('em teste só o motorista 5013 recebe, com a fila completa, mesmo com correções em dry', async () => {
+    const { gateway, setStatuses, statuses } = createArcoverdeQueue();
+    const baseVehicles = await gateway.listVehicles();
+    gateway.listVehicles = async () => baseVehicles.map(vehicle => vehicle.id === 302 ? { ...vehicle, callsign: '5013' } : vehicle);
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'dry', 'live', ['5013']);
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
+    await service.runConnection(connection);
+    setStatuses(statuses().map(status => status.vehicleId === 301 ? { ...status, queuePosition: 2 } : status.vehicleId === 302 ? { ...status, queuePosition: 1 } : status));
+    await service.runConnection(connection);
+    assert.deepEqual(gateway.sentMessages, [{ vehicleId: 302, message: 'ARCOVERDE - Fila Praia atualizada. Você é o 1º. 1º 5013 | 2º A1' }]);
+    assert.equal((repository.getDashboard().messages ?? []).length, 1);
+    repository.close();
+});
+test('DRIVER_MESSAGES_ONLY usa 5013 por padrão e * libera para todos', () => {
+    const previous = process.env.DRIVER_MESSAGES_ONLY;
+    try {
+        delete process.env.DRIVER_MESSAGES_ONLY;
+        assert.deepEqual(readConfiguration().driverMessageRecipients, ['5013']);
+        process.env.DRIVER_MESSAGES_ONLY = '*';
+        assert.equal(readConfiguration().driverMessageRecipients, null);
+        process.env.DRIVER_MESSAGES_ONLY = '5013, 4020';
+        assert.deepEqual(readConfiguration().driverMessageRecipients, ['5013', '4020']);
+    }
+    finally {
+        if (previous === undefined) delete process.env.DRIVER_MESSAGES_ONLY;
+        else process.env.DRIVER_MESSAGES_ONLY = previous;
+    }
 });

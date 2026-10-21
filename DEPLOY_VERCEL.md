@@ -17,7 +17,8 @@ Em Settings → Environment Variables configure para Production:
 | `PANEL_TOKEN` | Token aleatório próprio para proteger os logs e entrar no painel |
 | `CRON_SECRET` | Outro token aleatório, exclusivo do agendador |
 | `CRON_REPEAT_INTERVAL_MS` | Opcional: intervalo das passadas extras dentro de cada cron (padrão 20000; 0 desliga) |
-| `DRIVER_MESSAGES_MODE` | Avisos de fila da Arcoverde: `off`, `dry` (padrão, só registra) ou `live` (envia; exige AUTOCAB_MODE=live) |
+| `DRIVER_MESSAGES_MODE` | Avisos de fila da Arcoverde: `off`, `dry` (padrão, só registra) ou `live` (envia, mesmo com AUTOCAB_MODE=dry) |
+| `DRIVER_MESSAGES_ONLY` | Quem recebe os avisos: callsigns/IDs separados por vírgula. Padrão `5013` (teste com o Luciano); `*` libera para todos |
 | `AUTOCAB_DRIVER_MESSAGE_PATH` | Endpoint de mensagem da central para o motorista, com `{vehicleId}` (padrão `/vehicle/v1/vehicles/{vehicleId}/message`) |
 | `AUTOCAB_MODE` | `dry` para validar consultas e planos sem mover veículos |
 

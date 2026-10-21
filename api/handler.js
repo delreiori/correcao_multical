@@ -134,6 +134,12 @@ function readDriverMessagesMode() {
     throw new Error("DRIVER_MESSAGES_MODE deve ser off, dry ou live");
   return mode;
 }
+function readDriverMessageRecipients() {
+  const value = (process.env.DRIVER_MESSAGES_ONLY ?? "5013").trim();
+  if (value === "*")
+    return null;
+  return value.split(",").map((recipient) => recipient.trim()).filter(Boolean);
+}
 function readDriverMessagePath() {
   const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || "/vehicle/v1/vehicles/{vehicleId}/message";
   if (!path.startsWith("/") || !path.includes("{vehicleId}"))
@@ -162,6 +168,7 @@ function readConfiguration() {
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
     driverMessagesMode: readDriverMessagesMode(),
     driverMessagePath: readDriverMessagePath(),
+    driverMessageRecipients: readDriverMessageRecipients(),
     connections: readConnections()
   };
 }
@@ -506,7 +513,8 @@ async function notifyQueueChanges(options) {
   const { store, gateway, connectionId } = options;
   if (options.messagesMode === "off" || !store.getZoneQueueSignatures || !store.saveZoneQueueSignature || !store.recordDriverMessage)
     return { zonesChanged: 0, messages: 0, failed: 0 };
-  const sendForReal = options.messagesMode === "live" && options.mode === "live";
+  const sendForReal = options.messagesMode === "live" && options.mode !== "demo";
+  const allowed = options.recipients ? new Set(options.recipients) : null;
   const vehiclesById = new Map(options.vehicles.map((vehicle) => [vehicle.id, vehicle]));
   const previousSignatures = await store.getZoneQueueSignatures(connectionId);
   let zonesChanged = 0, messages = 0, failed = 0;
@@ -521,6 +529,8 @@ async function notifyQueueChanges(options) {
     zonesChanged++;
     for (let start = 0; start < queue.drivers.length; start += MESSAGE_CONCURRENCY) {
       await Promise.all(queue.drivers.slice(start, start + MESSAGE_CONCURRENCY).map(async (driver, offset) => {
+        if (allowed && !allowed.has(driver.callsign) && !allowed.has(String(driver.vehicleId)))
+          return;
         const queuePosition = start + offset;
         const message = buildQueueMessage(options.companyName, queue, queuePosition);
         let outcome = "simulated", httpStatus = null;
@@ -572,11 +582,13 @@ var CorrectionService = class {
   notes = [];
   resolvedCompanyIds = /* @__PURE__ */ new Map();
   driverMessagesMode;
-  constructor(repository, rules, mode, driverMessagesMode = "off") {
+  driverMessageRecipients;
+  constructor(repository, rules, mode, driverMessagesMode = "off", driverMessageRecipients = null) {
     this.repository = repository;
     this.rules = rules;
     this.mode = mode;
     this.driverMessagesMode = driverMessagesMode;
+    this.driverMessageRecipients = driverMessageRecipients;
   }
   async loadSnapshot(gateway) {
     const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
@@ -757,7 +769,7 @@ var CorrectionService = class {
       }
       if (connection.driverMessages && connection.companyId !== void 0) {
         try {
-          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules });
+          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients });
           if (result.messages > 0)
             this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
         } catch (error) {
@@ -876,7 +888,7 @@ async function createNeonRuntime() {
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath }) : null;
     return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
   });
-  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode);
+  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients);
   const runner = new NeonCycleRunner(repository, service, connections);
   return { configuration, repository, connections, runner, close: () => pool.end() };
 }

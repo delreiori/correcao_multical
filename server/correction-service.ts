@@ -45,7 +45,8 @@ export class CorrectionService {
     private notes: string[] = [];
     private resolvedCompanyIds = new Map<string, number>();
     private driverMessagesMode: DriverMessagesMode;
-    constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off') { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; }
+    private driverMessageRecipients: string[] | null;
+    constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off', driverMessageRecipients: string[] | null = null) { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; this.driverMessageRecipients = driverMessageRecipients; }
     private async loadSnapshot(gateway: AutocabGateway): Promise<FleetSnapshot> {
         const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
         if (new Set(zones.map(zone => zone.id)).size !== zones.length)
@@ -238,7 +239,7 @@ export class CorrectionService {
             if (connection.driverMessages && connection.companyId !== undefined) {
                 // Falha no aviso não desfaz a correção; fica registrada no detalhe do ciclo.
                 try {
-                    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter(vehicle => vehicle.companyId === connection.companyId), rules: this.rules });
+                    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter(vehicle => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients });
                     if (result.messages > 0)
                         this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ''}`);
                 }
