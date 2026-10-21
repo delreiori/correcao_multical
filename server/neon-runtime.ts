@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { CYCLE_TIME_BUDGET_MS } from './execution-limits.ts';
 import { Pool } from 'pg';
+import tls from 'node:tls';
+import { supabaseRootCertificate } from './supabase-ca.ts';
 import { readConfiguration } from './config.ts';
 import { AutocabClient } from './autocab.ts';
 import { DemoAutocabClient } from './demo.ts';
@@ -76,18 +78,26 @@ function createDatabasePool(databaseUrl: string) {
     // Keep TLS certificate verification active, including when the provider gives sslmode=require.
     for (const parameter of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert'])
         parsedUrl.searchParams.delete(parameter);
-    // Supabase assina com CA própria: DATABASE_SSL_CA recebe o certificado PEM (Database Settings →
-    // SSL Configuration → Download certificate) para verificar sem desligar a checagem.
-    const certificateAuthority = process.env.DATABASE_SSL_CA?.replace(/\\n/g, '\n').trim();
     // Sem statement_timeout na conexão: poolers (Supabase/PgBouncer) recusam parâmetros de início
     // desconhecidos. query_timeout limita cada consulta do lado do cliente.
-    return new Pool({ connectionString: parsedUrl.toString(), ssl: certificateAuthority ? { rejectUnauthorized: true, ca: certificateAuthority } : { rejectUnauthorized: true }, max: 3, connectionTimeoutMillis: 8000, query_timeout: 8000, idleTimeoutMillis: 10000 });
+    return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true, ca: databaseCertificateAuthorities(parsedUrl.hostname) }, max: 3, connectionTimeoutMillis: 8000, query_timeout: 8000, idleTimeoutMillis: 10000 });
+}
+// CAs aceitas no TLS do banco: as públicas do Node, a raiz do Supabase quando o host é do Supabase e,
+// opcionalmente, DATABASE_SSL_CA (PEM; aceita "\n" escrito no lugar das quebras). A verificação nunca é desligada.
+export function databaseCertificateAuthorities(hostname: string) {
+    const authorities = [...tls.rootCertificates];
+    if (/(^|\.)supabase\.(com|co)$/.test(hostname))
+        authorities.push(supabaseRootCertificate);
+    const extraAuthority = process.env.DATABASE_SSL_CA?.replace(/\\n/g, '\n').trim();
+    if (extraAuthority)
+        authorities.push(extraAuthority);
+    return authorities;
 }
 // Explica a falha de conexão pelo código do erro, sem expor a mensagem (pode conter dados da conexão).
 export function describeDatabaseError(error: unknown) {
     const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
     if (['SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'].includes(code))
-        return `certificado TLS do banco não reconhecido (${code}); no Supabase configure DATABASE_SSL_CA com o certificado PEM`;
+        return `certificado TLS do banco não reconhecido (${code}); confira o host do banco ou configure DATABASE_SSL_CA com o certificado PEM`;
     if (code === '28P01' || code === '28000')
         return `usuário ou senha do banco recusados (${code}); copie de novo a connection string`;
     if (['ENOTFOUND', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN'].includes(code))

@@ -8,10 +8,9 @@ O backend usa PostgreSQL comum; funciona no Supabase (ou no Neon). As tabelas s�
 
 1. Crie o projeto no Supabase e anote a senha do banco.
 2. Em **Connect**, copie a connection string do **Session pooler** (host `…pooler.supabase.com`, porta 5432) e troque `[YOUR-PASSWORD]` pela senha. Não use a conexão direta (`db.<projeto>.supabase.co`): ela é só IPv6 e a Vercel não alcança.
-3. Em **Database Settings → SSL Configuration**, baixe o certificado (**Download certificate**) e cole o conteúdo inteiro, de `-----BEGIN CERTIFICATE-----` a `-----END CERTIFICATE-----`, na variável `DATABASE_SSL_CA` da Vercel.
-4. Troque `DATABASE_URL` na Vercel pela nova string, salve `DATABASE_SSL_CA` e faça Redeploy.
+3. Troque `DATABASE_URL` na Vercel pela nova string e faça Redeploy. O certificado raiz do Supabase (Supabase Root 2021 CA) já vem no código e é usado automaticamente para hosts `*.supabase.com`; a verificação TLS continua ativa. `DATABASE_SSL_CA` só é necessária para outro certificado.
 
-Se a conexão falhar, o 503 do `/api/cron` e o painel dizem o motivo: certificado (falta `DATABASE_SSL_CA`), endereço inacessível (use o pooler), usuário/senha ou banco sem resposta. O histórico do Neon não é migrado; o Supabase começa vazio e a primeira leitura de cada fila só é guardada, sem avisos.
+Se a conexão falhar, o 503 do `/api/cron` e o painel dizem o motivo: certificado não reconhecido, endereço inacessível (use o pooler), usuário/senha ou banco sem resposta. O histórico do Neon não é migrado; o Supabase começa vazio e a primeira leitura de cada fila só é guardada, sem avisos.
 
 O histórico é limpo automaticamente uma vez por hora: ciclos com mais de 7 dias, avisos com mais de 30 e alterações com mais de 90 (alterações pendentes em live ficam).
 
@@ -22,7 +21,7 @@ Em Settings → Environment Variables configure para Production:
 | Variável | Finalidade |
 | --- | --- |
 | `DATABASE_URL` | Connection string do PostgreSQL (Supabase: **Session pooler**; veja abaixo) |
-| `DATABASE_SSL_CA` | Supabase: certificado PEM do banco, para verificar o TLS (veja abaixo) |
+| `DATABASE_SSL_CA` | Opcional: certificado PEM extra para o TLS do banco (o do Supabase já vem embutido) |
 | `AUTOCAB_SUBSCRIPTION_KEY` | Subscription Key da Multicall, com acesso a Vehicle e Booking |
 | `AUTOCAB_COMPANY_ID_ARCOVERDE` | Opcional: companyId da Arcoverde (vazio = resolvido pelo nome) |
 | `AUTOCAB_COMPANY_ID_SAO_CONRADO` | Opcional: companyId da São Conrado |

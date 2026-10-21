@@ -87,6 +87,33 @@ function readCronRepeatIntervalMs(value = process.env.CRON_REPEAT_INTERVAL_MS) {
 
 // server/neon-runtime.ts
 import { Pool } from "pg";
+import tls from "node:tls";
+
+// server/supabase-ca.ts
+var supabaseRootCertificate = `-----BEGIN CERTIFICATE-----
+MIIDxDCCAqygAwIBAgIUbLxMod62P2ktCiAkxnKJwtE9VPYwDQYJKoZIhvcNAQEL
+BQAwazELMAkGA1UEBhMCVVMxEDAOBgNVBAgMB0RlbHdhcmUxEzARBgNVBAcMCk5l
+dyBDYXN0bGUxFTATBgNVBAoMDFN1cGFiYXNlIEluYzEeMBwGA1UEAwwVU3VwYWJh
+c2UgUm9vdCAyMDIxIENBMB4XDTIxMDQyODEwNTY1M1oXDTMxMDQyNjEwNTY1M1ow
+azELMAkGA1UEBhMCVVMxEDAOBgNVBAgMB0RlbHdhcmUxEzARBgNVBAcMCk5ldyBD
+YXN0bGUxFTATBgNVBAoMDFN1cGFiYXNlIEluYzEeMBwGA1UEAwwVU3VwYWJhc2Ug
+Um9vdCAyMDIxIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqQXW
+QyHOB+qR2GJobCq/CBmQ40G0oDmCC3mzVnn8sv4XNeWtE5XcEL0uVih7Jo4Dkx1Q
+DmGHBH1zDfgs2qXiLb6xpw/CKQPypZW1JssOTMIfQppNQ87K75Ya0p25Y3ePS2t2
+GtvHxNjUV6kjOZjEn2yWEcBdpOVCUYBVFBNMB4YBHkNRDa/+S4uywAoaTWnCJLUi
+cvTlHmMw6xSQQn1UfRQHk50DMCEJ7Cy1RxrZJrkXXRP3LqQL2ijJ6F4yMfh+Gyb4
+O4XajoVj/+R4GwywKYrrS8PrSNtwxr5StlQO8zIQUSMiq26wM8mgELFlS/32Uclt
+NaQ1xBRizkzpZct9DwIDAQABo2AwXjALBgNVHQ8EBAMCAQYwHQYDVR0OBBYEFKjX
+uXY32CztkhImng4yJNUtaUYsMB8GA1UdIwQYMBaAFKjXuXY32CztkhImng4yJNUt
+aUYsMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAB8spzNn+4VU
+tVxbdMaX+39Z50sc7uATmus16jmmHjhIHz+l/9GlJ5KqAMOx26mPZgfzG7oneL2b
+VW+WgYUkTT3XEPFWnTp2RJwQao8/tYPXWEJDc0WVQHrpmnWOFKU/d3MqBgBm5y+6
+jB81TU/RG2rVerPDWP+1MMcNNy0491CTL5XQZ7JfDJJ9CCmXSdtTl4uUQnSuv/Qx
+Cea13BX2ZgJc7Au30vihLhub52De4P/4gonKsNHYdbWjg7OWKwNv/zitGDVDB9Y2
+CMTyZKG3XEu5Ghl1LEnI3QmEKsqaCLv12BnVjbkSeZsMnevJPs1Ye6TjjJwdik5P
+o/bKiIz+Fq8=
+-----END CERTIFICATE-----
+`;
 
 // server/config.ts
 import { readFileSync } from "node:fs";
@@ -897,13 +924,21 @@ function createDatabasePool(databaseUrl) {
     throw new Error("DATABASE_URL deve ser PostgreSQL");
   for (const parameter of ["sslmode", "sslcert", "sslkey", "sslrootcert"])
     parsedUrl.searchParams.delete(parameter);
-  const certificateAuthority = process.env.DATABASE_SSL_CA?.replace(/\\n/g, "\n").trim();
-  return new Pool({ connectionString: parsedUrl.toString(), ssl: certificateAuthority ? { rejectUnauthorized: true, ca: certificateAuthority } : { rejectUnauthorized: true }, max: 3, connectionTimeoutMillis: 8e3, query_timeout: 8e3, idleTimeoutMillis: 1e4 });
+  return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true, ca: databaseCertificateAuthorities(parsedUrl.hostname) }, max: 3, connectionTimeoutMillis: 8e3, query_timeout: 8e3, idleTimeoutMillis: 1e4 });
+}
+function databaseCertificateAuthorities(hostname) {
+  const authorities = [...tls.rootCertificates];
+  if (/(^|\.)supabase\.(com|co)$/.test(hostname))
+    authorities.push(supabaseRootCertificate);
+  const extraAuthority = process.env.DATABASE_SSL_CA?.replace(/\\n/g, "\n").trim();
+  if (extraAuthority)
+    authorities.push(extraAuthority);
+  return authorities;
 }
 function describeDatabaseError(error) {
   const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
   if (["SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"].includes(code))
-    return `certificado TLS do banco n\xE3o reconhecido (${code}); no Supabase configure DATABASE_SSL_CA com o certificado PEM`;
+    return `certificado TLS do banco n\xE3o reconhecido (${code}); confira o host do banco ou configure DATABASE_SSL_CA com o certificado PEM`;
   if (code === "28P01" || code === "28000")
     return `usu\xE1rio ou senha do banco recusados (${code}); copie de novo a connection string`;
   if (["ENOTFOUND", "ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN"].includes(code))

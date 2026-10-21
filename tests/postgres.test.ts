@@ -228,3 +228,18 @@ test('falhas de conexão com o banco viram orientação sem expor a mensagem', a
     assert.match(describeDatabaseError({ code: '28P01' }), /senha/);
     assert.doesNotMatch(describeDatabaseError({ code: 'X', message: 'postgres://user:pass@host' }), /pass/);
 });
+test('TLS do banco aceita a raiz do Supabase só em hosts do Supabase, sem desligar a verificação', async () => {
+    const { X509Certificate } = await import('node:crypto');
+    const tls = await import('node:tls');
+    const { databaseCertificateAuthorities } = await import('../server/neon-runtime.ts');
+    const { supabaseRootCertificate } = await import('../server/supabase-ca.ts');
+    const certificate = new X509Certificate(supabaseRootCertificate);
+    assert.match(certificate.subject, /CN=Supabase Root 2021 CA/);
+    assert.equal(certificate.fingerprint256, '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA');
+    assert.ok(new Date(certificate.validTo) > new Date());
+    const supabase = databaseCertificateAuthorities('aws-0-sa-east-1.pooler.supabase.com');
+    assert.ok(supabase.includes(supabaseRootCertificate));
+    assert.ok(tls.rootCertificates.every(root => supabase.includes(root)), 'CAs públicas continuam aceitas');
+    assert.ok(!databaseCertificateAuthorities('ep-x.sa-east-1.aws.neon.tech').includes(supabaseRootCertificate));
+    assert.ok(!databaseCertificateAuthorities('supabase.com.attacker.example').includes(supabaseRootCertificate));
+});
