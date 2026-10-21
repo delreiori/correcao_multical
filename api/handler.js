@@ -56,7 +56,17 @@ CREATE TABLE IF NOT EXISTS driver_messages (
  "queuePosition" integer NOT NULL, message text NOT NULL, mode text NOT NULL, outcome text NOT NULL,
  "httpStatus" integer, "createdAt" text NOT NULL
 );
-CREATE INDEX IF NOT EXISTS driver_messages_connection_time ON driver_messages("connectionId", "createdAt");`;
+CREATE INDEX IF NOT EXISTS driver_messages_connection_time ON driver_messages("connectionId", "createdAt");
+CREATE INDEX IF NOT EXISTS correction_cycles_started ON correction_cycles("startedAt");
+-- Supabase exp\xF5e o schema public pela API; RLS sem pol\xEDticas bloqueia esse acesso. O dono das
+-- tabelas (a conex\xE3o do backend) continua com acesso normal.
+ALTER TABLE plot_changes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE correction_cycles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE autocab_zones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE correction_lock ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vehicle_cursors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE zone_queue_signatures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE driver_messages ENABLE ROW LEVEL SECURITY;`;
   }
 });
 
@@ -471,6 +481,13 @@ var PostgresAuditRepository = class {
   async recordDriverMessage(message) {
     await this.database.query('INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"httpStatus","createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)', [randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, (/* @__PURE__ */ new Date()).toISOString()]);
   }
+  // Retenção: ciclos por 7 dias, avisos por 30 e alterações por 90 (as pendentes em live ficam).
+  async pruneHistory(now = /* @__PURE__ */ new Date()) {
+    const daysAgo = (days) => new Date(now.getTime() - days * 864e5).toISOString();
+    await this.database.query(`DELETE FROM correction_cycles WHERE "startedAt"<$1 AND outcome<>'running'`, [daysAgo(7)]);
+    await this.database.query('DELETE FROM driver_messages WHERE "createdAt"<$1', [daysAgo(30)]);
+    await this.database.query(`DELETE FROM plot_changes WHERE "createdAt"<$1 AND NOT (mode='live' AND outcome IN ('pending','unknown','unconfirmed'))`, [daysAgo(90)]);
+  }
 };
 
 // server/rules.ts
@@ -825,6 +842,7 @@ var NeonCycleRunner = class {
   running = false;
   // Indica se a última execução terminou todas as empresas sem lote parcial nem falha.
   lastRunCompleted = false;
+  lastPruneAt = 0;
   constructor(repository, service, connections) {
     this.repository = repository;
     this.service = service;
@@ -842,6 +860,10 @@ var NeonCycleRunner = class {
       if (!acquired)
         throw new CycleAlreadyRunningError("Outra inst\xE2ncia est\xE1 executando um ciclo");
       await this.repository.recoverInterruptedCycles();
+      if (Date.now() - this.lastPruneAt > 36e5) {
+        this.lastPruneAt = Date.now();
+        await this.repository.pruneHistory();
+      }
       const deadline = Date.now() + CYCLE_TIME_BUDGET_MS;
       const snapshotCache = /* @__PURE__ */ new Map();
       let completedConnections = 0;
@@ -875,7 +897,22 @@ function createDatabasePool(databaseUrl) {
     throw new Error("DATABASE_URL deve ser PostgreSQL");
   for (const parameter of ["sslmode", "sslcert", "sslkey", "sslrootcert"])
     parsedUrl.searchParams.delete(parameter);
-  return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true }, max: 3, connectionTimeoutMillis: 5e3, query_timeout: 5e3, statement_timeout: 5e3, idleTimeoutMillis: 1e4 });
+  const certificateAuthority = process.env.DATABASE_SSL_CA?.replace(/\\n/g, "\n").trim();
+  return new Pool({ connectionString: parsedUrl.toString(), ssl: certificateAuthority ? { rejectUnauthorized: true, ca: certificateAuthority } : { rejectUnauthorized: true }, max: 3, connectionTimeoutMillis: 8e3, query_timeout: 8e3, idleTimeoutMillis: 1e4 });
+}
+function describeDatabaseError(error) {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  if (["SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"].includes(code))
+    return `certificado TLS do banco n\xE3o reconhecido (${code}); no Supabase configure DATABASE_SSL_CA com o certificado PEM`;
+  if (code === "28P01" || code === "28000")
+    return `usu\xE1rio ou senha do banco recusados (${code}); copie de novo a connection string`;
+  if (["ENOTFOUND", "ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN"].includes(code))
+    return `endere\xE7o do banco inacess\xEDvel (${code}); no Supabase use a connection string do pooler (Session ou Transaction pooler), n\xE3o a direta`;
+  if (["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET"].includes(code))
+    return `banco n\xE3o respondeu (${code}); confira se o projeto est\xE1 ativo`;
+  if (code === "53300" || code === "XX000")
+    return `banco recusou a conex\xE3o (${code}); confira limites e status do projeto`;
+  return code ? `falha ao conectar (${code})` : "falha ao conectar";
 }
 async function initializeDatabase(pool) {
   const client = await pool.connect();
@@ -906,9 +943,9 @@ async function createNeonRuntime() {
   } });
   try {
     await initializeDatabase(pool);
-  } catch {
+  } catch (error) {
     await pool.end();
-    throw new Error("N\xE3o foi poss\xEDvel preparar o Neon; confira DATABASE_URL e acesso ao banco");
+    throw new Error(`N\xE3o foi poss\xEDvel preparar o banco PostgreSQL: ${describeDatabaseError(error)}`);
   }
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];

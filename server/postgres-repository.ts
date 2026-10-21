@@ -85,4 +85,11 @@ export class PostgresAuditRepository implements AuditStore {
     async recordDriverMessage(message: NewDriverMessage) {
         await this.database.query('INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"httpStatus","createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)', [randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, new Date().toISOString()]);
     }
+    // Retenção: ciclos por 7 dias, avisos por 30 e alterações por 90 (as pendentes em live ficam).
+    async pruneHistory(now = new Date()) {
+        const daysAgo = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
+        await this.database.query('DELETE FROM correction_cycles WHERE "startedAt"<$1 AND outcome<>\'running\'', [daysAgo(7)]);
+        await this.database.query('DELETE FROM driver_messages WHERE "createdAt"<$1', [daysAgo(30)]);
+        await this.database.query("DELETE FROM plot_changes WHERE \"createdAt\"<$1 AND NOT (mode='live' AND outcome IN ('pending','unknown','unconfirmed'))", [daysAgo(90)]);
+    }
 }

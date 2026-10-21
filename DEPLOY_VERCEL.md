@@ -1,6 +1,19 @@
-# Neon e Vercel
+# Banco PostgreSQL e Vercel
 
 A Vercel serve o frontend Vite e as rotas `/api/*` pela função `api/handler.js`. O backend usa PostgreSQL, não grava SQLite no filesystem da função e não inicia um timer permanente. As tabelas são criadas automaticamente no primeiro acesso autenticado, com SQL idempotente e lock de inicialização. Não é necessário colar SQL no Neon.
+
+## Banco no Supabase
+
+O backend usa PostgreSQL comum; funciona no Supabase (ou no Neon). As tabelas são criadas sozinhas na primeira chamada, com RLS ligado para a API pública do Supabase não expor os dados.
+
+1. Crie o projeto no Supabase e anote a senha do banco.
+2. Em **Connect**, copie a connection string do **Session pooler** (host `…pooler.supabase.com`, porta 5432) e troque `[YOUR-PASSWORD]` pela senha. Não use a conexão direta (`db.<projeto>.supabase.co`): ela é só IPv6 e a Vercel não alcança.
+3. Em **Database Settings → SSL Configuration**, baixe o certificado (**Download certificate**) e cole o conteúdo inteiro, de `-----BEGIN CERTIFICATE-----` a `-----END CERTIFICATE-----`, na variável `DATABASE_SSL_CA` da Vercel.
+4. Troque `DATABASE_URL` na Vercel pela nova string, salve `DATABASE_SSL_CA` e faça Redeploy.
+
+Se a conexão falhar, o 503 do `/api/cron` e o painel dizem o motivo: certificado (falta `DATABASE_SSL_CA`), endereço inacessível (use o pooler), usuário/senha ou banco sem resposta. O histórico do Neon não é migrado; o Supabase começa vazio e a primeira leitura de cada fila só é guardada, sem avisos.
+
+O histórico é limpo automaticamente uma vez por hora: ciclos com mais de 7 dias, avisos com mais de 30 e alterações com mais de 90 (alterações pendentes em live ficam).
 
 ## Variáveis na Vercel
 
@@ -8,7 +21,8 @@ Em Settings → Environment Variables configure para Production:
 
 | Variável | Finalidade |
 | --- | --- |
-| `DATABASE_URL` | Conexão pooled do Neon, com TLS, copiada de Connect |
+| `DATABASE_URL` | Connection string do PostgreSQL (Supabase: **Session pooler**; veja abaixo) |
+| `DATABASE_SSL_CA` | Supabase: certificado PEM do banco, para verificar o TLS (veja abaixo) |
 | `AUTOCAB_SUBSCRIPTION_KEY` | Subscription Key da Multicall, com acesso a Vehicle e Booking |
 | `AUTOCAB_COMPANY_ID_ARCOVERDE` | Opcional: companyId da Arcoverde (vazio = resolvido pelo nome) |
 | `AUTOCAB_COMPANY_ID_SAO_CONRADO` | Opcional: companyId da São Conrado |

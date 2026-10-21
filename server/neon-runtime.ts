@@ -20,6 +20,7 @@ export class NeonCycleRunner implements CycleRuntime {
     running = false;
     // Indica se a última execução terminou todas as empresas sem lote parcial nem falha.
     lastRunCompleted = false;
+    private lastPruneAt = 0;
     constructor(repository: PostgresAuditRepository, service: CorrectionService, connections: CorrectionConnection[]) { this.repository = repository; this.service = service; this.connections = connections; }
     async runOnce() {
         if (this.running)
@@ -33,6 +34,11 @@ export class NeonCycleRunner implements CycleRuntime {
             if (!acquired)
                 throw new CycleAlreadyRunningError('Outra instância está executando um ciclo');
             await this.repository.recoverInterruptedCycles();
+            // Limpa o histórico antigo no máximo uma vez por hora, para o banco não encher.
+            if (Date.now() - this.lastPruneAt > 3_600_000) {
+                this.lastPruneAt = Date.now();
+                await this.repository.pruneHistory();
+            }
             const deadline = Date.now() + CYCLE_TIME_BUDGET_MS;
             const snapshotCache = new Map();
             let completedConnections = 0;
@@ -67,10 +73,30 @@ function createDatabasePool(databaseUrl: string) {
     const parsedUrl = new URL(databaseUrl);
     if (!['postgres:', 'postgresql:'].includes(parsedUrl.protocol))
         throw new Error('DATABASE_URL deve ser PostgreSQL');
-    // Keep TLS certificate verification active, including when Neon gives sslmode=require.
+    // Keep TLS certificate verification active, including when the provider gives sslmode=require.
     for (const parameter of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert'])
         parsedUrl.searchParams.delete(parameter);
-    return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true }, max: 3, connectionTimeoutMillis: 5000, query_timeout: 5000, statement_timeout: 5000, idleTimeoutMillis: 10000 });
+    // Supabase assina com CA própria: DATABASE_SSL_CA recebe o certificado PEM (Database Settings →
+    // SSL Configuration → Download certificate) para verificar sem desligar a checagem.
+    const certificateAuthority = process.env.DATABASE_SSL_CA?.replace(/\\n/g, '\n').trim();
+    // Sem statement_timeout na conexão: poolers (Supabase/PgBouncer) recusam parâmetros de início
+    // desconhecidos. query_timeout limita cada consulta do lado do cliente.
+    return new Pool({ connectionString: parsedUrl.toString(), ssl: certificateAuthority ? { rejectUnauthorized: true, ca: certificateAuthority } : { rejectUnauthorized: true }, max: 3, connectionTimeoutMillis: 8000, query_timeout: 8000, idleTimeoutMillis: 10000 });
+}
+// Explica a falha de conexão pelo código do erro, sem expor a mensagem (pode conter dados da conexão).
+export function describeDatabaseError(error: unknown) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (['SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'].includes(code))
+        return `certificado TLS do banco não reconhecido (${code}); no Supabase configure DATABASE_SSL_CA com o certificado PEM`;
+    if (code === '28P01' || code === '28000')
+        return `usuário ou senha do banco recusados (${code}); copie de novo a connection string`;
+    if (['ENOTFOUND', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN'].includes(code))
+        return `endereço do banco inacessível (${code}); no Supabase use a connection string do pooler (Session ou Transaction pooler), não a direta`;
+    if (['ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET'].includes(code))
+        return `banco não respondeu (${code}); confira se o projeto está ativo`;
+    if (code === '53300' || code === 'XX000')
+        return `banco recusou a conexão (${code}); confira limites e status do projeto`;
+    return code ? `falha ao conectar (${code})` : 'falha ao conectar';
 }
 async function initializeDatabase(pool: Pool) {
     const client = await pool.connect();
@@ -102,9 +128,9 @@ export async function createNeonRuntime() {
     try {
         await initializeDatabase(pool);
     }
-    catch {
+    catch (error) {
         await pool.end();
-        throw new Error('Não foi possível preparar o Neon; confira DATABASE_URL e acesso ao banco');
+        throw new Error(`Não foi possível preparar o banco PostgreSQL: ${describeDatabaseError(error)}`);
     }
     const connections: CorrectionConnection[] = configuration.connections.map(connection => {
         const key = process.env[connection.subscriptionKeyEnvironmentVariable];

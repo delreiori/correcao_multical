@@ -207,3 +207,24 @@ test('PostgreSQL guarda a fila avisada e as mensagens aos motoristas', async () 
         assert.equal(messages[0].vehicleId, 301);
     } finally { await database.close(); }
 });
+test('retenção apaga histórico antigo e mantém pendências em live', async () => {
+    const { database, repository } = await createDatabase();
+    try {
+        const old = '2020-01-01T00:00:00.000Z';
+        await database.query(`INSERT INTO correction_cycles(id,"connectionId",mode,"startedAt",outcome) VALUES('c-old','a','dry','${old}','completed'),('c-new','a','dry','${new Date().toISOString()}','completed')`);
+        await repository.recordDriverMessage({ connectionId: 'a', cycleId: 'c', vehicleId: 1, callsign: '1', zoneId: 1, zoneName: 'Z', queuePosition: 1, message: 'm', mode: 'dry', outcome: 'simulated', httpStatus: null });
+        await database.query(`UPDATE driver_messages SET "createdAt"='${old}'`);
+        await database.query(`INSERT INTO plot_changes(id,"connectionId","cycleId","vehicleId",mode,outcome,"createdAt","changeData") VALUES('p-old','a','c',1,'dry','planned','${old}','{}'),('p-pending','a','c',2,'live','unknown','${old}','{}')`);
+        await repository.pruneHistory();
+        assert.deepEqual((await database.query('SELECT id FROM correction_cycles')).rows.map(row => (row as { id: string }).id), ['c-new']);
+        assert.equal((await database.query('SELECT id FROM driver_messages')).rows.length, 0);
+        assert.deepEqual((await database.query('SELECT id FROM plot_changes')).rows.map(row => (row as { id: string }).id), ['p-pending']);
+    } finally { await database.close(); }
+});
+test('falhas de conexão com o banco viram orientação sem expor a mensagem', async () => {
+    const { describeDatabaseError } = await import('../server/neon-runtime.ts');
+    assert.match(describeDatabaseError({ code: 'SELF_SIGNED_CERT_IN_CHAIN', message: 'secret' }), /DATABASE_SSL_CA/);
+    assert.match(describeDatabaseError({ code: 'ENETUNREACH' }), /pooler/);
+    assert.match(describeDatabaseError({ code: '28P01' }), /senha/);
+    assert.doesNotMatch(describeDatabaseError({ code: 'X', message: 'postgres://user:pass@host' }), /pass/);
+});

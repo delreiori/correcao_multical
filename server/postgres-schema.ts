@@ -31,4 +31,14 @@ CREATE TABLE IF NOT EXISTS driver_messages (
  "queuePosition" integer NOT NULL, message text NOT NULL, mode text NOT NULL, outcome text NOT NULL,
  "httpStatus" integer, "createdAt" text NOT NULL
 );
-CREATE INDEX IF NOT EXISTS driver_messages_connection_time ON driver_messages("connectionId", "createdAt");`;
+CREATE INDEX IF NOT EXISTS driver_messages_connection_time ON driver_messages("connectionId", "createdAt");
+CREATE INDEX IF NOT EXISTS correction_cycles_started ON correction_cycles("startedAt");
+-- Supabase expõe o schema public pela API; RLS sem políticas bloqueia esse acesso. O dono das
+-- tabelas (a conexão do backend) continua com acesso normal.
+ALTER TABLE plot_changes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE correction_cycles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE autocab_zones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE correction_lock ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vehicle_cursors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE zone_queue_signatures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE driver_messages ENABLE ROW LEVEL SECURITY;`;
