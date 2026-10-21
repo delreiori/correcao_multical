@@ -26,7 +26,7 @@ Na Arcoverde, sempre que a ordem da fila de uma zona muda (pelo sistema ou não)
 
 Em teste, os avisos vão **só para o motorista 5013 (Luciano)**; a fila listada na mensagem continua completa. `DRIVER_MESSAGES_ONLY` muda a lista (callsigns ou IDs separados por vírgula) e `DRIVER_MESSAGES_ONLY=*` libera para todos os motoristas livres da zona.
 
-`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. `DRIVER_MESSAGES_MODE=live` envia de verdade, mesmo com `AUTOCAB_MODE=dry`, para testar a mensagem sem mover carros. O envio usa "Send Message to Vehicle(s)" da Vehicle API: POST em `/vehicle/v1/vehicles/message` (alterável em `AUTOCAB_DRIVER_MESSAGE_PATH`) com corpo `{ text, vehicles: [vehicleId] }`, uma requisição por motorista porque o texto traz a posição de cada um. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
+`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. `DRIVER_MESSAGES_MODE=live` envia de verdade, mesmo com `AUTOCAB_MODE=dry`, para testar a mensagem sem mover carros. O envio usa "Send Message to Vehicle(s)" da Vehicle API: POST em `/vehicle/v1/vehicles/message` (alterável em `AUTOCAB_DRIVER_MESSAGE_PATH`) com corpo `{ text, vehicles: [vehicleId] }`, uma requisição por motorista porque o texto traz a posição de cada um. A mensagem vai como **urgente** com o campo `urgent: true`; a especificação não documenta esse campo, então ele pode ser trocado em `AUTOCAB_DRIVER_MESSAGE_FIELDS` (JSON) se a Autocab usar outro nome. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
 
 ## Instalação e execução
 

@@ -19,7 +19,7 @@ else {
     repository.recoverInterruptedCycles();
     const connections = configuration.connections.map(connection => {
         const subscriptionKey = process.env[connection.subscriptionKeyEnvironmentVariable];
-        const gateway = configuration.mode === 'demo' ? new DemoAutocabClient() : subscriptionKey ? new AutocabClient(configuration.baseUrl, subscriptionKey, fetch, 15000, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath }) : null;
+        const gateway = configuration.mode === 'demo' ? new DemoAutocabClient() : subscriptionKey ? new AutocabClient(configuration.baseUrl, subscriptionKey, fetch, 15000, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
         return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
     });
     const correctionService = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients);

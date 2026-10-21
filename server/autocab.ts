@@ -12,6 +12,8 @@ export interface AutocabGateway {
 export interface AutocabClientOptions {
     companiesPath?: string;
     driverMessagePath?: string;
+    // Campos extras do corpo da mensagem; marcam o aviso como urgente.
+    driverMessageFields?: Record<string, unknown>;
 }
 export class AutocabRequestError extends Error {
     httpStatus: number | null;
@@ -71,6 +73,7 @@ export class AutocabClient implements AutocabGateway {
     private timeoutMs: number;
     private companiesPath: string;
     private driverMessagePath: string;
+    private driverMessageFields: Record<string, unknown>;
     constructor(baseUrl: string, subscriptionKey: string, requestFetch: typeof fetch = fetch, timeoutMs = 15000, options: AutocabClientOptions = {}) {
         this.baseUrl = new URL(baseUrl);
         if (this.baseUrl.protocol !== 'https:' || this.baseUrl.username || this.baseUrl.password)
@@ -82,6 +85,7 @@ export class AutocabClient implements AutocabGateway {
         this.timeoutMs = timeoutMs;
         this.companiesPath = options.companiesPath ?? '/booking/v1/companies';
         this.driverMessagePath = options.driverMessagePath ?? '/vehicle/v1/vehicles/message';
+        this.driverMessageFields = options.driverMessageFields ?? { urgent: true };
     }
     private async sendRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<Response> {
         const headers: Record<string, string> = { 'Accept': 'application/json', 'Ocp-Apim-Subscription-Key': this.subscriptionKey };
@@ -147,7 +151,7 @@ export class AutocabClient implements AutocabGateway {
     }
     // "Send Message to Vehicle(s)" da Vehicle API: mensagem da central para o terminal do motorista.
     async sendDriverMessage(vehicleId: number, message: string) {
-        const response = await this.sendRequest(this.driverMessagePath, 'POST', { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [] });
+        const response = await this.sendRequest(this.driverMessagePath, 'POST', { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [], ...this.driverMessageFields });
         await response.arrayBuffer();
         return response.status;
     }

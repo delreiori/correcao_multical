@@ -140,6 +140,20 @@ function readDriverMessageRecipients() {
     return null;
   return value.split(",").map((recipient) => recipient.trim()).filter(Boolean);
 }
+function readDriverMessageFields() {
+  const value = process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS?.trim();
+  if (!value)
+    return { urgent: true };
+  let fields;
+  try {
+    fields = JSON.parse(value);
+  } catch {
+    throw new Error('AUTOCAB_DRIVER_MESSAGE_FIELDS deve ser um JSON, ex.: {"urgent":true}');
+  }
+  if (typeof fields !== "object" || fields === null || Array.isArray(fields))
+    throw new Error('AUTOCAB_DRIVER_MESSAGE_FIELDS deve ser um objeto JSON, ex.: {"urgent":true}');
+  return fields;
+}
 function readDriverMessagePath() {
   const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || "/vehicle/v1/vehicles/message";
   if (!path.startsWith("/"))
@@ -168,6 +182,7 @@ function readConfiguration() {
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
     driverMessagesMode: readDriverMessagesMode(),
     driverMessagePath: readDriverMessagePath(),
+    driverMessageFields: readDriverMessageFields(),
     driverMessageRecipients: readDriverMessageRecipients(),
     connections: readConnections()
   };
@@ -237,6 +252,7 @@ var AutocabClient = class {
   timeoutMs;
   companiesPath;
   driverMessagePath;
+  driverMessageFields;
   constructor(baseUrl, subscriptionKey, requestFetch = fetch, timeoutMs = 15e3, options = {}) {
     this.baseUrl = new URL(baseUrl);
     if (this.baseUrl.protocol !== "https:" || this.baseUrl.username || this.baseUrl.password)
@@ -248,6 +264,7 @@ var AutocabClient = class {
     this.timeoutMs = timeoutMs;
     this.companiesPath = options.companiesPath ?? "/booking/v1/companies";
     this.driverMessagePath = options.driverMessagePath ?? "/vehicle/v1/vehicles/message";
+    this.driverMessageFields = options.driverMessageFields ?? { urgent: true };
   }
   async sendRequest(path, method = "GET", body) {
     const headers = { "Accept": "application/json", "Ocp-Apim-Subscription-Key": this.subscriptionKey };
@@ -318,7 +335,7 @@ var AutocabClient = class {
   }
   // "Send Message to Vehicle(s)" da Vehicle API: mensagem da central para o terminal do motorista.
   async sendDriverMessage(vehicleId, message) {
-    const response = await this.sendRequest(this.driverMessagePath, "POST", { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [] });
+    const response = await this.sendRequest(this.driverMessagePath, "POST", { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [], ...this.driverMessageFields });
     await response.arrayBuffer();
     return response.status;
   }
@@ -889,7 +906,7 @@ async function createNeonRuntime() {
   }
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
-    const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath }) : null;
+    const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
     return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
   });
   const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients);

@@ -23,6 +23,7 @@ export interface AppConfig {
     companiesPath: string;
     driverMessagesMode: DriverMessagesMode;
     driverMessagePath: string;
+    driverMessageFields: Record<string, unknown>;
     // Callsigns ou IDs que recebem os avisos; null = todos os motoristas livres da zona.
     driverMessageRecipients: string[] | null;
     connections: ConnectionConfig[];
@@ -90,6 +91,23 @@ function readDriverMessageRecipients(): string[] | null {
         return null;
     return value.split(',').map(recipient => recipient.trim()).filter(Boolean);
 }
+// A especificação não documenta o campo de urgência; o padrão é { "urgent": true } e pode ser trocado
+// em AUTOCAB_DRIVER_MESSAGE_FIELDS (JSON) sem novo deploy de código.
+function readDriverMessageFields(): Record<string, unknown> {
+    const value = process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS?.trim();
+    if (!value)
+        return { urgent: true };
+    let fields: unknown;
+    try {
+        fields = JSON.parse(value);
+    }
+    catch {
+        throw new Error('AUTOCAB_DRIVER_MESSAGE_FIELDS deve ser um JSON, ex.: {"urgent":true}');
+    }
+    if (typeof fields !== 'object' || fields === null || Array.isArray(fields))
+        throw new Error('AUTOCAB_DRIVER_MESSAGE_FIELDS deve ser um objeto JSON, ex.: {"urgent":true}');
+    return fields as Record<string, unknown>;
+}
 function readDriverMessagePath() {
     const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || '/vehicle/v1/vehicles/message';
     if (!path.startsWith('/'))
@@ -109,5 +127,5 @@ export function readConfiguration(): AppConfig {
         protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA').split(',').map(name => name.trim()).filter(Boolean),
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
-        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageRecipients: readDriverMessageRecipients(), connections: readConnections() };
+        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageFields: readDriverMessageFields(), driverMessageRecipients: readDriverMessageRecipients(), connections: readConnections() };
 }

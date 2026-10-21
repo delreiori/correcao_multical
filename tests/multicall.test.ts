@@ -218,5 +218,20 @@ test('mensagem ao motorista usa Send Message to Vehicle(s) da Vehicle API', asyn
     }) as typeof fetch;
     const client = new AutocabClient('https://autocab-api.azure-api.net', 'key', fakeFetch);
     assert.equal(await client.sendDriverMessage(5013, 'fila'), 200);
-    assert.deepEqual(request, { path: '/vehicle/v1/vehicles/message', method: 'POST', body: { text: 'fila', vehicles: [5013], companies: [], capabilities: [], zones: [] } });
+    assert.deepEqual(request, { path: '/vehicle/v1/vehicles/message', method: 'POST', body: { text: 'fila', vehicles: [5013], companies: [], capabilities: [], zones: [], urgent: true } });
+});
+test('campos de urgência da mensagem podem ser trocados por AUTOCAB_DRIVER_MESSAGE_FIELDS', () => {
+    const previous = process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS;
+    try {
+        delete process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS;
+        assert.deepEqual(readConfiguration().driverMessageFields, { urgent: true });
+        process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS = '{"isUrgent":true,"messageType":"Urgent"}';
+        assert.deepEqual(readConfiguration().driverMessageFields, { isUrgent: true, messageType: 'Urgent' });
+        process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS = '[1]';
+        assert.throws(() => readConfiguration(), /objeto JSON/);
+    }
+    finally {
+        if (previous === undefined) delete process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS;
+        else process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS = previous;
+    }
 });
