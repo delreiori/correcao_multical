@@ -113,7 +113,7 @@ test('companyId restringe veículos e é encaminhado para consulta GPS', async (
     const gateway = new DemoAutocabClient();
     const companies: number[] = [];
     const coordinateLookup: AutocabGateway['findZoneByCoordinates'] = async (_latitude, _longitude, companyId) => { companies.push(companyId!); return 2; };
-    const { repository, service, connection } = createService('dry', { ...gateway, listCompanies: gateway.listCompanies.bind(gateway), listZones: gateway.listZones.bind(gateway), listVehicles: gateway.listVehicles.bind(gateway), listVehicleStatuses: gateway.listVehicleStatuses.bind(gateway), listGpsPositions: gateway.listGpsPositions.bind(gateway), applyVehiclePlot: gateway.applyVehiclePlot.bind(gateway), findZoneByCoordinates: coordinateLookup });
+    const { repository, service, connection } = createService('dry', { ...gateway, listCompanies: gateway.listCompanies.bind(gateway), listZones: gateway.listZones.bind(gateway), listVehicles: gateway.listVehicles.bind(gateway), listVehicleStatuses: gateway.listVehicleStatuses.bind(gateway), listGpsPositions: gateway.listGpsPositions.bind(gateway), applyVehiclePlot: gateway.applyVehiclePlot.bind(gateway), sendDriverMessage: gateway.sendDriverMessage.bind(gateway), findZoneByCoordinates: coordinateLookup });
     await service.runConnection({ ...connection, companyId: 2 });
     assert.equal(repository.getDashboard().changes.length, 0);
     await service.runConnection({ ...connection, companyId: 1 });
@@ -185,7 +185,7 @@ test('SQLite conserva histórico e recuperação marca envio interrompido', () =
 test('painel exige token e fornece logs/zonas após ciclo HTTP', async () => {
     const { repository, service, connection } = createService('demo');
     const scheduler = new CorrectionScheduler(service, [connection], 60000);
-    const config: AppConfig = { mode: 'demo', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', connections: [] };
+    const config: AppConfig = { mode: 'demo', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', driverMessagesMode: 'off', driverMessagePath: '/vehicle/v1/vehicles/{vehicleId}/message', connections: [] };
     const application = createApplication(config, repository, scheduler, [connection]);
     const server = application.listen(0, '127.0.0.1');
     await new Promise<void>(resolve => server.once('listening', resolve));

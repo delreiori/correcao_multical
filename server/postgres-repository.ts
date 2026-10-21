@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { CYCLE_LEASE_SECONDS } from './execution-limits.ts';
-import type { AuditStore } from './audit-store.ts';
-import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, CycleLog, Zone, SavedZone, DashboardData } from '../shared/types.ts';
+import type { AuditStore, NewDriverMessage } from './audit-store.ts';
+import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, CycleLog, Zone, SavedZone, DashboardData, DriverMessageLog } from '../shared/types.ts';
 import { postgresSchema } from './postgres-schema.ts';
 export interface SqlExecutor {
     query(sql: string, parameters?: unknown[]): Promise<{
@@ -52,13 +52,14 @@ export class PostgresAuditRepository implements AuditStore {
     async getDashboard(connectionId: string | null = null): Promise<DashboardData> {
         const filter = connectionId ? ' WHERE "connectionId"=$1' : '';
         const parameters = connectionId ? [connectionId] : [];
-        const [changes, cycles, zones, count] = await Promise.all([
+        const [changes, cycles, zones, count, messages] = await Promise.all([
             this.database.query('SELECT * FROM plot_changes' + filter + ' ORDER BY "createdAt" DESC,id DESC LIMIT 500', parameters),
             this.database.query('SELECT * FROM correction_cycles' + filter + ' ORDER BY "startedAt" DESC,id DESC LIMIT 100', parameters),
             this.database.query('SELECT * FROM autocab_zones' + filter + ' ORDER BY "connectionId",name', parameters),
-            this.database.query('SELECT COUNT(*) AS total FROM plot_changes' + filter, parameters)
+            this.database.query('SELECT COUNT(*) AS total FROM plot_changes' + filter, parameters),
+            this.database.query('SELECT * FROM driver_messages' + filter + ' ORDER BY "createdAt" DESC,id DESC LIMIT 200', parameters)
         ]);
-        return { changes: changes.rows.map(row => this.decodeChange(row)), cycles: cycles.rows as unknown as CycleLog[], zones: zones.rows.map(row => ({ ...row, id: Number(row.id), companyId: row.companyId === null ? null : Number(row.companyId) })) as unknown as SavedZone[], totalChanges: Number(count.rows[0]?.total ?? 0) };
+        return { changes: changes.rows.map(row => this.decodeChange(row)), cycles: cycles.rows as unknown as CycleLog[], zones: zones.rows.map(row => ({ ...row, id: Number(row.id), companyId: row.companyId === null ? null : Number(row.companyId) })) as unknown as SavedZone[], totalChanges: Number(count.rows[0]?.total ?? 0), messages: messages.rows.map(row => ({ ...row, vehicleId: Number(row.vehicleId), zoneId: Number(row.zoneId) })) as unknown as DriverMessageLog[] };
     }
     async acquireCycleLease(owner: string) {
         const result = await this.database.query(`INSERT INTO correction_lock(name,owner,"expiresAt") VALUES('autocab', $1, now()+($2::integer * interval '1 second'))
@@ -68,4 +69,14 @@ export class PostgresAuditRepository implements AuditStore {
     async releaseCycleLease(owner: string) { await this.database.query('DELETE FROM correction_lock WHERE name=$1 AND owner=$2', ['autocab', owner]); }
     async getVehicleCursor(connectionId: string) { const result = await this.database.query('SELECT "vehicleId" FROM vehicle_cursors WHERE "connectionId"=$1', [connectionId]); return Number(result.rows[0]?.vehicleId ?? -1); }
     async saveVehicleCursor(connectionId: string, vehicleId: number) { await this.database.query('INSERT INTO vehicle_cursors("connectionId","vehicleId") VALUES($1,$2) ON CONFLICT("connectionId") DO UPDATE SET "vehicleId"=EXCLUDED."vehicleId"', [connectionId, vehicleId]); }
+    async getZoneQueueSignatures(connectionId: string) {
+        const result = await this.database.query('SELECT "zoneId",signature FROM zone_queue_signatures WHERE "connectionId"=$1', [connectionId]);
+        return new Map(result.rows.map(row => [Number(row.zoneId), String(row.signature)]));
+    }
+    async saveZoneQueueSignature(connectionId: string, zoneId: number, signature: string) {
+        await this.database.query('INSERT INTO zone_queue_signatures("connectionId","zoneId",signature,"updatedAt") VALUES($1,$2,$3,$4) ON CONFLICT("connectionId","zoneId") DO UPDATE SET signature=EXCLUDED.signature,"updatedAt"=EXCLUDED."updatedAt"', [connectionId, zoneId, signature, new Date().toISOString()]);
+    }
+    async recordDriverMessage(message: NewDriverMessage) {
+        await this.database.query('INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"httpStatus","createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)', [randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, new Date().toISOString()]);
+    }
 }

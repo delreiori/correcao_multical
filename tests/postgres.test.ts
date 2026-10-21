@@ -146,7 +146,7 @@ test('handler Vercel aplica autenticação de painel/cron e interpreta rewrite',
     process.env.CRON_REPEAT_INTERVAL_MS = '0';
     const gateway = new DemoAutocabClient();
     const connections = [{ id: 'main', name: 'Main', gateway }];
-    const configuration: AppConfig = { mode: 'dry', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', connections: [] };
+    const configuration: AppConfig = { mode: 'dry', baseUrl: 'https://autocab-api.azure-api.net', databasePath: ':memory:', host: '127.0.0.1', port: 3001, panelToken: 'panel-test', intervalMs: 60000, autoStart: false, ...rules, companiesPath: '/booking/v1/companies', driverMessagesMode: 'off', driverMessagePath: '/vehicle/v1/vehicles/{vehicleId}/message', connections: [] };
     const runner = new NeonCycleRunner(repository, new CorrectionService(repository, rules, 'dry'), connections);
     let runtimeLoads = 0;
     const handler = createServerlessHandler(async () => { runtimeLoads++; return { configuration, repository, connections, runner, close: async () => { } }; });
@@ -186,4 +186,16 @@ test('handler Vercel aplica autenticação de painel/cron e interpreta rewrite',
         await new Promise<void>(resolve => server.close(() => resolve()));
         await database.close();
     }
+});
+test('PostgreSQL guarda a fila avisada e as mensagens aos motoristas', async () => {
+    const { database, repository } = await createDatabase();
+    try {
+        await repository.saveZoneQueueSignature('arcoverde', 11, '301,302');
+        await repository.saveZoneQueueSignature('arcoverde', 11, '302,301');
+        assert.deepEqual([...(await repository.getZoneQueueSignatures('arcoverde'))], [[11, '302,301']]);
+        await repository.recordDriverMessage({ connectionId: 'arcoverde', cycleId: 'c1', vehicleId: 301, callsign: 'A1', zoneId: 11, zoneName: 'Praia', queuePosition: 2, message: 'fila', mode: 'dry', outcome: 'simulated', httpStatus: null });
+        const messages = (await repository.getDashboard('arcoverde')).messages ?? [];
+        assert.equal(messages.length, 1);
+        assert.equal(messages[0].vehicleId, 301);
+    } finally { await database.close(); }
 });

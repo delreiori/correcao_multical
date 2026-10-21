@@ -5,7 +5,7 @@ import { listCompaniesForConnections } from '../server/companies.ts';
 const configuration = readConfiguration();
 const connections = configuration.connections.map(connection => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
-    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, gateway: key ? new AutocabClient(configuration.baseUrl, key, fetch, 15000, configuration.companiesPath) : null };
+    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, gateway: key ? new AutocabClient(configuration.baseUrl, key, fetch, 15000, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath }) : null };
 });
 const { companies, selected } = await listCompaniesForConnections(connections);
 console.log('Empresas retornadas pela Autocab:');

@@ -45,7 +45,18 @@ CREATE TABLE IF NOT EXISTS correction_lock (
 );
 CREATE TABLE IF NOT EXISTS vehicle_cursors (
  "connectionId" text PRIMARY KEY, "vehicleId" bigint NOT NULL
-);`;
+);
+CREATE TABLE IF NOT EXISTS zone_queue_signatures (
+ "connectionId" text NOT NULL, "zoneId" bigint NOT NULL, signature text NOT NULL,
+ "updatedAt" text NOT NULL, PRIMARY KEY ("connectionId","zoneId")
+);
+CREATE TABLE IF NOT EXISTS driver_messages (
+ id text PRIMARY KEY, "connectionId" text NOT NULL, "cycleId" text NOT NULL,
+ "vehicleId" bigint NOT NULL, callsign text NOT NULL, "zoneId" bigint NOT NULL, "zoneName" text NOT NULL,
+ "queuePosition" integer NOT NULL, message text NOT NULL, mode text NOT NULL, outcome text NOT NULL,
+ "httpStatus" integer, "createdAt" text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS driver_messages_connection_time ON driver_messages("connectionId", "createdAt");`;
   }
 });
 
@@ -70,7 +81,8 @@ import { Pool } from "pg";
 // server/config.ts
 import { readFileSync } from "node:fs";
 var MULTICALL_COMPANIES = [
-  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE" },
+  // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda.
+  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true },
   { id: "sao-conrado", name: "S\xE3o Conrado", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_SAO_CONRADO" },
   { id: "pedra-da-gavea", name: "Pedra da G\xE1vea", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA" }
 ];
@@ -91,7 +103,7 @@ function readPositiveInteger(value, fallback) {
 }
 function readConnections() {
   if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name }));
+    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
   const connectionList = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, "utf8"));
   if (!Array.isArray(connectionList) || connectionList.length === 0)
     throw new Error("Lista de conex\xF5es vazia ou inv\xE1lida");
@@ -110,9 +122,23 @@ function readConnections() {
       throw new Error("companyId inv\xE1lido");
     if (connection.companyName !== void 0 && (typeof connection.companyName !== "string" || !connection.companyName.trim()))
       throw new Error("companyName inv\xE1lido");
+    if (connection.driverMessages !== void 0 && typeof connection.driverMessages !== "boolean")
+      throw new Error("driverMessages deve ser true ou false");
     identifiers.add(connection.id);
     return connection;
   });
+}
+function readDriverMessagesMode() {
+  const mode = process.env.DRIVER_MESSAGES_MODE || "dry";
+  if (!["off", "dry", "live"].includes(mode))
+    throw new Error("DRIVER_MESSAGES_MODE deve ser off, dry ou live");
+  return mode;
+}
+function readDriverMessagePath() {
+  const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || "/vehicle/v1/vehicles/{vehicleId}/message";
+  if (!path.startsWith("/") || !path.includes("{vehicleId}"))
+    throw new Error("AUTOCAB_DRIVER_MESSAGE_PATH deve come\xE7ar com / e conter {vehicleId}");
+  return path;
 }
 function readConfiguration() {
   const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? "dry" : "demo");
@@ -134,6 +160,8 @@ function readConfiguration() {
     protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA").split(",").map((name) => name.trim()).filter(Boolean),
     outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? "FORA DE AREA",
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
+    driverMessagesMode: readDriverMessagesMode(),
+    driverMessagePath: readDriverMessagePath(),
     connections: readConnections()
   };
 }
@@ -201,7 +229,8 @@ var AutocabClient = class {
   requestFetch;
   timeoutMs;
   companiesPath;
-  constructor(baseUrl, subscriptionKey, requestFetch = fetch, timeoutMs = 15e3, companiesPath = "/booking/v1/companies") {
+  driverMessagePath;
+  constructor(baseUrl, subscriptionKey, requestFetch = fetch, timeoutMs = 15e3, options = {}) {
     this.baseUrl = new URL(baseUrl);
     if (this.baseUrl.protocol !== "https:" || this.baseUrl.username || this.baseUrl.password)
       throw new Error("Base Autocab deve usar HTTPS sem credenciais na URL");
@@ -210,7 +239,8 @@ var AutocabClient = class {
     this.subscriptionKey = subscriptionKey;
     this.requestFetch = requestFetch;
     this.timeoutMs = timeoutMs;
-    this.companiesPath = companiesPath;
+    this.companiesPath = options.companiesPath ?? "/booking/v1/companies";
+    this.driverMessagePath = options.driverMessagePath ?? "/vehicle/v1/vehicles/{vehicleId}/message";
   }
   async sendRequest(path, method = "GET", body) {
     const headers = { "Accept": "application/json", "Ocp-Apim-Subscription-Key": this.subscriptionKey };
@@ -279,6 +309,12 @@ var AutocabClient = class {
     await response.arrayBuffer();
     return response.status;
   }
+  // Mensagem da central para o terminal do motorista; o caminho vem de AUTOCAB_DRIVER_MESSAGE_PATH.
+  async sendDriverMessage(vehicleId, message) {
+    const response = await this.sendRequest(this.driverMessagePath.replace("{vehicleId}", String(vehicleId)), "POST", { vehicleId, message });
+    await response.arrayBuffer();
+    return response.status;
+  }
 };
 
 // server/demo.ts
@@ -306,6 +342,11 @@ var DemoAutocabClient = class {
   }
   async findZoneByCoordinates(_latitude, _longitude, _companyId) {
     return 2;
+  }
+  sentMessages = [];
+  async sendDriverMessage(vehicleId, message) {
+    this.sentMessages.push({ vehicleId, message });
+    return 200;
   }
   async applyVehiclePlot(vehicleId, zoneId, position) {
     const vehicleStatus = this.statuses.find((status) => status.vehicleId === vehicleId);
@@ -366,13 +407,14 @@ var PostgresAuditRepository = class {
   async getDashboard(connectionId = null) {
     const filter = connectionId ? ' WHERE "connectionId"=$1' : "";
     const parameters = connectionId ? [connectionId] : [];
-    const [changes, cycles, zones, count] = await Promise.all([
+    const [changes, cycles, zones, count, messages] = await Promise.all([
       this.database.query("SELECT * FROM plot_changes" + filter + ' ORDER BY "createdAt" DESC,id DESC LIMIT 500', parameters),
       this.database.query("SELECT * FROM correction_cycles" + filter + ' ORDER BY "startedAt" DESC,id DESC LIMIT 100', parameters),
       this.database.query("SELECT * FROM autocab_zones" + filter + ' ORDER BY "connectionId",name', parameters),
-      this.database.query("SELECT COUNT(*) AS total FROM plot_changes" + filter, parameters)
+      this.database.query("SELECT COUNT(*) AS total FROM plot_changes" + filter, parameters),
+      this.database.query("SELECT * FROM driver_messages" + filter + ' ORDER BY "createdAt" DESC,id DESC LIMIT 200', parameters)
     ]);
-    return { changes: changes.rows.map((row) => this.decodeChange(row)), cycles: cycles.rows, zones: zones.rows.map((row) => ({ ...row, id: Number(row.id), companyId: row.companyId === null ? null : Number(row.companyId) })), totalChanges: Number(count.rows[0]?.total ?? 0) };
+    return { changes: changes.rows.map((row) => this.decodeChange(row)), cycles: cycles.rows, zones: zones.rows.map((row) => ({ ...row, id: Number(row.id), companyId: row.companyId === null ? null : Number(row.companyId) })), totalChanges: Number(count.rows[0]?.total ?? 0), messages: messages.rows.map((row) => ({ ...row, vehicleId: Number(row.vehicleId), zoneId: Number(row.zoneId) })) };
   }
   async acquireCycleLease(owner) {
     const result = await this.database.query(`INSERT INTO correction_lock(name,owner,"expiresAt") VALUES('autocab', $1, now()+($2::integer * interval '1 second'))
@@ -388,6 +430,16 @@ var PostgresAuditRepository = class {
   }
   async saveVehicleCursor(connectionId, vehicleId) {
     await this.database.query('INSERT INTO vehicle_cursors("connectionId","vehicleId") VALUES($1,$2) ON CONFLICT("connectionId") DO UPDATE SET "vehicleId"=EXCLUDED."vehicleId"', [connectionId, vehicleId]);
+  }
+  async getZoneQueueSignatures(connectionId) {
+    const result = await this.database.query('SELECT "zoneId",signature FROM zone_queue_signatures WHERE "connectionId"=$1', [connectionId]);
+    return new Map(result.rows.map((row) => [Number(row.zoneId), String(row.signature)]));
+  }
+  async saveZoneQueueSignature(connectionId, zoneId, signature) {
+    await this.database.query('INSERT INTO zone_queue_signatures("connectionId","zoneId",signature,"updatedAt") VALUES($1,$2,$3,$4) ON CONFLICT("connectionId","zoneId") DO UPDATE SET signature=EXCLUDED.signature,"updatedAt"=EXCLUDED."updatedAt"', [connectionId, zoneId, signature, (/* @__PURE__ */ new Date()).toISOString()]);
+  }
+  async recordDriverMessage(message) {
+    await this.database.query('INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"httpStatus","createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)', [randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, (/* @__PURE__ */ new Date()).toISOString()]);
   }
 };
 
@@ -433,6 +485,63 @@ function describeChange(status, currentZone, targetZone, callsign, gpsPosition, 
   return { vehicleId: status.vehicleId, callsign, previousZoneId: currentZone.id, previousZoneName: currentZone.name, targetZoneId: targetZone.id, targetZoneName: targetZone.name, position, reason: isBusy(status) ? "busy-outside" : "gps", latitude: gpsPosition?.latitude ?? null, longitude: gpsPosition?.longitude ?? null };
 }
 
+// server/driver-messages.ts
+var LISTED_DRIVERS = 10;
+var MESSAGE_CONCURRENCY = 8;
+function buildZoneQueues(zones, statuses, vehiclesById, rules) {
+  return zones.filter((zone) => !isProtectedZone(zone, rules)).map((zone) => {
+    const drivers = statuses.filter((status) => status.zoneId === zone.id && !isBusy(status) && vehiclesById.has(status.vehicleId)).sort((left, right) => (left.queuePosition ?? Infinity) - (right.queuePosition ?? Infinity) || left.vehicleId - right.vehicleId).map((status) => ({ vehicleId: status.vehicleId, callsign: vehiclesById.get(status.vehicleId).callsign }));
+    return { zone, drivers };
+  });
+}
+function queueSignature(queue) {
+  return queue.drivers.map((driver) => driver.vehicleId).join(",");
+}
+function buildQueueMessage(companyName, queue, recipientIndex) {
+  const listed = queue.drivers.slice(0, LISTED_DRIVERS).map((driver, index) => `${index + 1}\xBA ${driver.callsign}`).join(" | ");
+  const remaining = queue.drivers.length - LISTED_DRIVERS;
+  return `${companyName.toUpperCase()} - Fila ${queue.zone.name} atualizada. Voc\xEA \xE9 o ${recipientIndex + 1}\xBA. ${listed}${remaining > 0 ? ` | +${remaining}` : ""}`;
+}
+async function notifyQueueChanges(options) {
+  const { store, gateway, connectionId } = options;
+  if (options.messagesMode === "off" || !store.getZoneQueueSignatures || !store.saveZoneQueueSignature || !store.recordDriverMessage)
+    return { zonesChanged: 0, messages: 0, failed: 0 };
+  const sendForReal = options.messagesMode === "live" && options.mode === "live";
+  const vehiclesById = new Map(options.vehicles.map((vehicle) => [vehicle.id, vehicle]));
+  const previousSignatures = await store.getZoneQueueSignatures(connectionId);
+  let zonesChanged = 0, messages = 0, failed = 0;
+  for (const queue of buildZoneQueues(options.zones, options.statuses, vehiclesById, options.rules)) {
+    const signature = queueSignature(queue);
+    const previous = previousSignatures.get(queue.zone.id);
+    if (previous === signature)
+      continue;
+    await store.saveZoneQueueSignature(connectionId, queue.zone.id, signature);
+    if (previous === void 0 || queue.drivers.length === 0)
+      continue;
+    zonesChanged++;
+    for (let start = 0; start < queue.drivers.length; start += MESSAGE_CONCURRENCY) {
+      await Promise.all(queue.drivers.slice(start, start + MESSAGE_CONCURRENCY).map(async (driver, offset) => {
+        const queuePosition = start + offset;
+        const message = buildQueueMessage(options.companyName, queue, queuePosition);
+        let outcome = "simulated", httpStatus = null;
+        if (sendForReal) {
+          try {
+            httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
+            outcome = "sent";
+          } catch (error) {
+            httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+            outcome = "failed";
+            failed++;
+          }
+        }
+        messages++;
+        await store.recordDriverMessage({ connectionId, cycleId: options.cycleId, vehicleId: driver.vehicleId, callsign: driver.callsign, zoneId: queue.zone.id, zoneName: queue.zone.name, queuePosition: queuePosition + 1, message, mode: options.mode, outcome, httpStatus });
+      }));
+    }
+  }
+  return { zonesChanged, messages, failed };
+}
+
 // server/correction-service.ts
 async function resolveCompanyId(connection, gateway) {
   if (connection.companyId !== void 0 || connection.companyName === void 0)
@@ -462,10 +571,12 @@ var CorrectionService = class {
   inspectedCount = 0;
   notes = [];
   resolvedCompanyIds = /* @__PURE__ */ new Map();
-  constructor(repository, rules, mode) {
+  driverMessagesMode;
+  constructor(repository, rules, mode, driverMessagesMode = "off") {
     this.repository = repository;
     this.rules = rules;
     this.mode = mode;
+    this.driverMessagesMode = driverMessagesMode;
   }
   async loadSnapshot(gateway) {
     const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
@@ -549,21 +660,24 @@ var CorrectionService = class {
     return plannedChanges;
   }
   // Uma consulta de status confirma todos os envios do lote.
+  // Devolve os status lidos após os envios, reaproveitados no aviso de fila aos motoristas.
   async verifySentChanges(gateway, sentChanges) {
     if (sentChanges.length === 0)
-      return;
-    let latestStatuses;
+      return null;
+    let statusList;
     try {
-      latestStatuses = new Map((await gateway.listVehicleStatuses()).map((status) => [status.vehicleId, status]));
+      statusList = await gateway.listVehicleStatuses();
     } catch {
       for (const { changeId, httpStatus } of sentChanges)
         await this.repository.finishChange(changeId, "unconfirmed", httpStatus, "POST aceito; consulta de confirma\xE7\xE3o falhou. N\xE3o repetir automaticamente.");
-      return;
+      return null;
     }
+    const latestStatuses = new Map(statusList.map((status) => [status.vehicleId, status]));
     for (const { change, changeId, httpStatus } of sentChanges) {
       const isConfirmed = latestStatuses.get(change.vehicleId)?.zoneId === change.targetZoneId;
       await this.repository.finishChange(changeId, isConfirmed ? "confirmed" : "unconfirmed", httpStatus, isConfirmed ? "Zona confirmada ap\xF3s envio; posi\xE7\xE3o enviada registrada no hist\xF3rico." : "POST aceito; zona ainda n\xE3o confirmada. Ve\xEDculo bloqueado para nova tentativa autom\xE1tica.");
     }
+    return statusList;
   }
   async recordSendFailure(changeId, error) {
     const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
@@ -628,6 +742,7 @@ var CorrectionService = class {
       const reservedPositions = /* @__PURE__ */ new Map();
       const sentChanges = [];
       const latestStatuses = this.mode === "live" && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
+      let statusesAfterSend = null;
       try {
         for (const change of changes) {
           if (Date.now() > this.deadline - 15e3) {
@@ -638,7 +753,16 @@ var CorrectionService = class {
           await this.executeChange(connection, cycleId, change, gateway, latestStatuses, reservedPositions, sentChanges);
         }
       } finally {
-        await this.verifySentChanges(gateway, sentChanges);
+        statusesAfterSend = await this.verifySentChanges(gateway, sentChanges);
+      }
+      if (connection.driverMessages && connection.companyId !== void 0) {
+        try {
+          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules });
+          if (result.messages > 0)
+            this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
+        } catch (error) {
+          this.notes.push(`avisos de fila n\xE3o enviados: ${safeErrorMessage(error)}`);
+        }
       }
       if (this.deferred)
         this.notes.push("Tempo do ciclo esgotado; ve\xEDculos restantes ser\xE3o retomados no pr\xF3ximo ciclo.");
@@ -749,10 +873,10 @@ async function createNeonRuntime() {
   }
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
-    const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, configuration.companiesPath) : null;
-    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, gateway };
+    const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath }) : null;
+    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
   });
-  const service = new CorrectionService(repository, configuration, configuration.mode);
+  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode);
   const runner = new NeonCycleRunner(repository, service, connections);
   return { configuration, repository, connections, runner, close: () => pool.end() };
 }

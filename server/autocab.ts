@@ -7,6 +7,11 @@ export interface AutocabGateway {
     listGpsPositions(): Promise<VehicleGpsPosition[]>;
     findZoneByCoordinates(latitude: number, longitude: number, companyId?: number): Promise<number | null>;
     applyVehiclePlot(vehicleId: number, zoneId: number, position: number): Promise<number>;
+    sendDriverMessage(vehicleId: number, message: string): Promise<number>;
+}
+export interface AutocabClientOptions {
+    companiesPath?: string;
+    driverMessagePath?: string;
 }
 export class AutocabRequestError extends Error {
     httpStatus: number | null;
@@ -65,7 +70,8 @@ export class AutocabClient implements AutocabGateway {
     private requestFetch: typeof fetch;
     private timeoutMs: number;
     private companiesPath: string;
-    constructor(baseUrl: string, subscriptionKey: string, requestFetch: typeof fetch = fetch, timeoutMs = 15000, companiesPath = '/booking/v1/companies') {
+    private driverMessagePath: string;
+    constructor(baseUrl: string, subscriptionKey: string, requestFetch: typeof fetch = fetch, timeoutMs = 15000, options: AutocabClientOptions = {}) {
         this.baseUrl = new URL(baseUrl);
         if (this.baseUrl.protocol !== 'https:' || this.baseUrl.username || this.baseUrl.password)
             throw new Error('Base Autocab deve usar HTTPS sem credenciais na URL');
@@ -74,7 +80,8 @@ export class AutocabClient implements AutocabGateway {
         this.subscriptionKey = subscriptionKey;
         this.requestFetch = requestFetch;
         this.timeoutMs = timeoutMs;
-        this.companiesPath = companiesPath;
+        this.companiesPath = options.companiesPath ?? '/booking/v1/companies';
+        this.driverMessagePath = options.driverMessagePath ?? '/vehicle/v1/vehicles/{vehicleId}/message';
     }
     private async sendRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<Response> {
         const headers: Record<string, string> = { 'Accept': 'application/json', 'Ocp-Apim-Subscription-Key': this.subscriptionKey };
@@ -135,6 +142,12 @@ export class AutocabClient implements AutocabGateway {
     }
     async applyVehiclePlot(vehicleId: number, zoneId: number, position: number) {
         const response = await this.sendRequest(`/vehicle/v1/vehicles/${vehicleId}/plot`, 'POST', { vehicleId, zoneId, position });
+        await response.arrayBuffer();
+        return response.status;
+    }
+    // Mensagem da central para o terminal do motorista; o caminho vem de AUTOCAB_DRIVER_MESSAGE_PATH.
+    async sendDriverMessage(vehicleId: number, message: string) {
+        const response = await this.sendRequest(this.driverMessagePath.replace('{vehicleId}', String(vehicleId)), 'POST', { vehicleId, message });
         await response.arrayBuffer();
         return response.status;
     }

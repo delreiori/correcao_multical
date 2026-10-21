@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, CycleLog, Zone, SavedZone, DashboardData } from '../shared/types.ts';
+import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, CycleLog, Zone, SavedZone, DashboardData, DriverMessageLog } from '../shared/types.ts';
+import type { NewDriverMessage } from './audit-store.ts';
 export class AuditRepository {
     private database: DatabaseSync;
     constructor(databasePath: string) {
@@ -9,7 +10,9 @@ export class AuditRepository {
    CREATE TABLE IF NOT EXISTS plot_changes(id TEXT PRIMARY KEY,connectionId TEXT NOT NULL,cycleId TEXT NOT NULL,vehicleId INTEGER NOT NULL,mode TEXT NOT NULL,outcome TEXT NOT NULL,createdAt TEXT NOT NULL,finishedAt TEXT,httpStatus INTEGER,detail TEXT,changeData TEXT NOT NULL);
    CREATE INDEX IF NOT EXISTS plot_changes_connection_time ON plot_changes(connectionId,createdAt);
    CREATE TABLE IF NOT EXISTS correction_cycles(id TEXT PRIMARY KEY,connectionId TEXT NOT NULL,mode TEXT NOT NULL,startedAt TEXT NOT NULL,finishedAt TEXT,outcome TEXT NOT NULL,inspected INTEGER NOT NULL DEFAULT 0,planned INTEGER NOT NULL DEFAULT 0,detail TEXT);
-   CREATE TABLE IF NOT EXISTS autocab_zones(connectionId TEXT NOT NULL,id INTEGER NOT NULL,name TEXT NOT NULL,companyId INTEGER,updatedAt TEXT NOT NULL,PRIMARY KEY(connectionId,id));`);
+   CREATE TABLE IF NOT EXISTS autocab_zones(connectionId TEXT NOT NULL,id INTEGER NOT NULL,name TEXT NOT NULL,companyId INTEGER,updatedAt TEXT NOT NULL,PRIMARY KEY(connectionId,id));
+   CREATE TABLE IF NOT EXISTS zone_queue_signatures(connectionId TEXT NOT NULL,zoneId INTEGER NOT NULL,signature TEXT NOT NULL,updatedAt TEXT NOT NULL,PRIMARY KEY(connectionId,zoneId));
+   CREATE TABLE IF NOT EXISTS driver_messages(id TEXT PRIMARY KEY,connectionId TEXT NOT NULL,cycleId TEXT NOT NULL,vehicleId INTEGER NOT NULL,callsign TEXT NOT NULL,zoneId INTEGER NOT NULL,zoneName TEXT NOT NULL,queuePosition INTEGER NOT NULL,message TEXT NOT NULL,mode TEXT NOT NULL,outcome TEXT NOT NULL,httpStatus INTEGER,createdAt TEXT NOT NULL);`);
     }
     close() { this.database.close(); }
     recoverInterruptedCycles() {
@@ -61,6 +64,17 @@ export class AuditRepository {
         const cycles = this.database.prepare('SELECT * FROM correction_cycles' + filter + ' ORDER BY startedAt DESC,rowid DESC LIMIT 100').all(...parameters) as unknown as CycleLog[];
         const zones = this.database.prepare('SELECT * FROM autocab_zones' + filter + ' ORDER BY connectionId,name').all(...parameters) as unknown as SavedZone[];
         const count = this.database.prepare('SELECT COUNT(*) AS total FROM plot_changes' + filter).get(...parameters);
-        return { changes, cycles, zones, totalChanges: Number(count?.total ?? 0) };
+        const messages = this.database.prepare('SELECT * FROM driver_messages' + filter + ' ORDER BY createdAt DESC,rowid DESC LIMIT 200').all(...parameters) as unknown as DriverMessageLog[];
+        return { changes, cycles, zones, totalChanges: Number(count?.total ?? 0), messages };
+    }
+    getZoneQueueSignatures(connectionId: string) {
+        const rows = this.database.prepare('SELECT zoneId,signature FROM zone_queue_signatures WHERE connectionId=?').all(connectionId);
+        return new Map(rows.map(row => [Number(row.zoneId), String(row.signature)]));
+    }
+    saveZoneQueueSignature(connectionId: string, zoneId: number, signature: string) {
+        this.database.prepare('INSERT INTO zone_queue_signatures VALUES(?,?,?,?) ON CONFLICT(connectionId,zoneId) DO UPDATE SET signature=excluded.signature,updatedAt=excluded.updatedAt').run(connectionId, zoneId, signature, new Date().toISOString());
+    }
+    recordDriverMessage(message: NewDriverMessage) {
+        this.database.prepare('INSERT INTO driver_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, new Date().toISOString());
     }
 }

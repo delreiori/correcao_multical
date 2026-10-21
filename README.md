@@ -15,6 +15,17 @@ Em cada ciclo as três empresas rodam, cada uma com uma parte do tempo do ciclo,
 
 Aplicação com Node.js 24+, TypeScript, React e PostgreSQL/Neon na Vercel; SQLite continua disponível para uso local sem DATABASE_URL. Veja [o guia de deploy](DEPLOY_VERCEL.md). Integra os endpoints presentes no `plot-zona-core.js` fornecido. Consulta zonas, GPS, status e veículos; calcula mudanças; registra intenção, envio e confirmação no banco. O frontend é somente de acompanhamento, com atualização a cada 5 segundos.
 
+## Avisos de fila aos motoristas (Arcoverde)
+
+Na Arcoverde, sempre que a ordem da fila de uma zona muda (pelo sistema ou não), cada motorista **livre dentro daquela zona** recebe uma mensagem da central com a fila atualizada e a própria posição, por exemplo: `ARCOVERDE - Fila Praia atualizada. Você é o 2º. 1º A2 | 2º A1 | 3º A7`. Regras:
+
+- Motorista ocupado (já trabalhando) não recebe e não aparece na fila.
+- Só recebe quem está na zona que mudou; zonas protegidas (NAK, FORA DE AREA) não geram aviso.
+- Fila igual à do último aviso não repete a mensagem. Na primeira leitura de cada zona a fila só é guardada.
+- O texto lista até 10 motoristas e resume o restante como `+N`.
+
+`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. Para enviar, use `DRIVER_MESSAGES_MODE=live` com `AUTOCAB_MODE=live`. O envio é um POST em `AUTOCAB_DRIVER_MESSAGE_PATH` (padrão `/vehicle/v1/vehicles/{vehicleId}/message`) com corpo `{ vehicleId, message }`; confira esse caminho com a Autocab antes de ativar. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
+
 ## Instalação e execução
 
 ```bash

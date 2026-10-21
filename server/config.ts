@@ -6,7 +6,9 @@ export interface ConnectionConfig {
     subscriptionKeyEnvironmentVariable: string;
     companyId?: number;
     companyName?: string;
+    driverMessages?: boolean;
 }
+export type DriverMessagesMode = 'off' | 'dry' | 'live';
 export interface AppConfig {
     mode: OperatingMode;
     baseUrl: string;
@@ -19,12 +21,15 @@ export interface AppConfig {
     protectedZoneNames: string[];
     outsideZoneName: string;
     companiesPath: string;
+    driverMessagesMode: DriverMessagesMode;
+    driverMessagePath: string;
     connections: ConnectionConfig[];
 }
 // Empresas da Multicall corrigidas por padrão. Todas usam a mesma Subscription Key; o rastreio
 // de cada uma fica separado pelo companyId, informado na variável ou resolvido pelo nome no GET de empresas.
 export const MULTICALL_COMPANIES = [
-    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE' },
+    // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda.
+    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true },
     { id: 'sao-conrado', name: 'São Conrado', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_SAO_CONRADO' },
     { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA' },
 ];
@@ -45,7 +50,7 @@ function readPositiveInteger(value: string | undefined, fallback: number): numbe
 }
 function readConnections(): ConnectionConfig[] {
     if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name }));
+        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
     const connectionList: unknown = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, 'utf8'));
     if (!Array.isArray(connectionList) || connectionList.length === 0)
         throw new Error('Lista de conexões vazia ou inválida');
@@ -64,9 +69,23 @@ function readConnections(): ConnectionConfig[] {
             throw new Error('companyId inválido');
         if (connection.companyName !== undefined && (typeof connection.companyName !== 'string' || !connection.companyName.trim()))
             throw new Error('companyName inválido');
+        if (connection.driverMessages !== undefined && typeof connection.driverMessages !== 'boolean')
+            throw new Error('driverMessages deve ser true ou false');
         identifiers.add(connection.id);
         return connection as unknown as ConnectionConfig;
     });
+}
+function readDriverMessagesMode(): DriverMessagesMode {
+    const mode = process.env.DRIVER_MESSAGES_MODE || 'dry';
+    if (!['off', 'dry', 'live'].includes(mode))
+        throw new Error('DRIVER_MESSAGES_MODE deve ser off, dry ou live');
+    return mode as DriverMessagesMode;
+}
+function readDriverMessagePath() {
+    const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || '/vehicle/v1/vehicles/{vehicleId}/message';
+    if (!path.startsWith('/') || !path.includes('{vehicleId}'))
+        throw new Error('AUTOCAB_DRIVER_MESSAGE_PATH deve começar com / e conter {vehicleId}');
+    return path;
 }
 export function readConfiguration(): AppConfig {
     const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? 'dry' : 'demo');
@@ -80,5 +99,6 @@ export function readConfiguration(): AppConfig {
         intervalMs: Math.max(5000, readPositiveInteger(process.env.CYCLE_INTERVAL_MS, 60000)), autoStart: process.env.AUTO_START !== 'false',
         protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA').split(',').map(name => name.trim()).filter(Boolean),
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
-        companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies', connections: readConnections() };
+        companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
+        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), connections: readConnections() };
 }

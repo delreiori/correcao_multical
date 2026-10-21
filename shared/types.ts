@@ -66,6 +66,22 @@ export interface CycleLog {
     planned: number;
     detail: string | null;
 }
+export type DriverMessageOutcome = 'simulated' | 'sent' | 'failed';
+export interface DriverMessageLog {
+    id: string;
+    connectionId: string;
+    cycleId: string;
+    vehicleId: number;
+    callsign: string;
+    zoneId: number;
+    zoneName: string;
+    queuePosition: number;
+    message: string;
+    mode: OperatingMode;
+    outcome: DriverMessageOutcome;
+    httpStatus: number | null;
+    createdAt: string;
+}
 export interface SavedZone extends Zone {
     connectionId: string;
     updatedAt: string;
@@ -75,6 +91,7 @@ export interface DashboardData {
     cycles: CycleLog[];
     zones: SavedZone[];
     totalChanges: number;
+    messages?: DriverMessageLog[];
 }
 export interface ConnectionStatus {
     id: string;

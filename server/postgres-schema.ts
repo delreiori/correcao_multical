@@ -20,4 +20,15 @@ CREATE TABLE IF NOT EXISTS correction_lock (
 );
 CREATE TABLE IF NOT EXISTS vehicle_cursors (
  "connectionId" text PRIMARY KEY, "vehicleId" bigint NOT NULL
-);`;
+);
+CREATE TABLE IF NOT EXISTS zone_queue_signatures (
+ "connectionId" text NOT NULL, "zoneId" bigint NOT NULL, signature text NOT NULL,
+ "updatedAt" text NOT NULL, PRIMARY KEY ("connectionId","zoneId")
+);
+CREATE TABLE IF NOT EXISTS driver_messages (
+ id text PRIMARY KEY, "connectionId" text NOT NULL, "cycleId" text NOT NULL,
+ "vehicleId" bigint NOT NULL, callsign text NOT NULL, "zoneId" bigint NOT NULL, "zoneName" text NOT NULL,
+ "queuePosition" integer NOT NULL, message text NOT NULL, mode text NOT NULL, outcome text NOT NULL,
+ "httpStatus" integer, "createdAt" text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS driver_messages_connection_time ON driver_messages("connectionId", "createdAt");`;

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { DashboardData, SystemStatus, ChangeOutcome, ChangeLog, CycleLog, SavedZone } from '../shared/types.ts';
+import type { DashboardData, SystemStatus, ChangeOutcome, ChangeLog, CycleLog, SavedZone, DriverMessageLog } from '../shared/types.ts';
 import { fetchDashboard, fetchSystemStatus } from './api.ts';
 import './style.css';
 const outcomeLabels: Record<ChangeOutcome, string> = { planned: 'Simulada', pending: 'Enviando', confirmed: 'Confirmada', unconfirmed: 'Aguardando confirmação', unknown: 'Resultado incerto', failed: 'Rejeitada', skipped: 'Ignorada' };
@@ -10,6 +10,12 @@ function ChangeHistory({ changes }: {
     changes: ChangeLog[];
 }) {
     return <article className="history"><h2>Alterações de zona e fila</h2><div className="table"><table><thead><tr><th>Horário</th><th>Conexão / veículo</th><th>Zona anterior → destino</th><th>Posição enviada</th><th>Motivo</th><th>Resultado</th><th>Detalhes</th></tr></thead><tbody>{changes.map(change => <tr key={change.id}><td>{formatDate(change.createdAt)}</td><td><strong>{change.callsign}</strong><br /><small>{change.connectionId} · ID {change.vehicleId}</small></td><td>{change.previousZoneName} → {change.targetZoneName}</td><td>{change.position}</td><td>{change.reason === 'gps' ? 'Correção por GPS' : 'Ocupado → fora de área'}</td><td><span className={'badge ' + change.outcome}>{outcomeLabels[change.outcome]}</span><br /><small>{modeLabels[change.mode]}</small></td><td>{change.detail || '—'}{change.httpStatus && <small> · HTTP {change.httpStatus}</small>}</td></tr>)}</tbody></table>{changes.length === 0 && <p className="empty">Nenhuma alteração registrada para este filtro.</p>}</div><p className="note">Horários de Brasília. Exibindo até 500 registros recentes. A posição na fila pode avançar após o envio.</p></article>;
+}
+function DriverMessages({ messages }: {
+    messages: DriverMessageLog[];
+}) {
+    const labels = { simulated: 'Simulada', sent: 'Enviada', failed: 'Falhou' };
+    return <article className="history"><h2>Avisos de fila aos motoristas</h2><div className="table"><table><thead><tr><th>Horário</th><th>Motorista</th><th>Zona / posição</th><th>Mensagem</th><th>Resultado</th></tr></thead><tbody>{messages.map(message => <tr key={message.id}><td>{formatDate(message.createdAt)}</td><td><strong>{message.callsign}</strong><br /><small>{message.connectionId} · ID {message.vehicleId}</small></td><td>{message.zoneName} · {message.queuePosition}º</td><td>{message.message}</td><td>{labels[message.outcome]}{message.httpStatus && <small> · HTTP {message.httpStatus}</small>}</td></tr>)}</tbody></table>{messages.length === 0 && <p className="empty">Nenhum aviso de fila registrado para este filtro.</p>}</div><p className="note">Só motoristas livres dentro da zona recebem o aviso quando a fila muda. Exibindo até 200 avisos recentes.</p></article>;
 }
 function CycleHistory({ cycles }: {
     cycles: CycleLog[];
@@ -58,13 +64,13 @@ function Dashboard() {
     }, [panelToken, connectionId, refreshVersion]);
     const confirmedCount = dashboard.changes.filter(change => change.outcome === 'confirmed').length;
     const attentionCount = dashboard.changes.filter(change => ['unknown', 'failed', 'unconfirmed'].includes(change.outcome)).length;
-    return <main><header><div><span className="eyebrow">COOPERDUQUE · CONTROLE DE ZONAS</span><h1>Movimentações da frota</h1><p>Histórico automático de zonas e posições na fila.</p></div><span className="mode">{systemStatus ? modeLabels[systemStatus.mode] : 'Conectando…'}</span></header>
+    return <main><header><div><span className="eyebrow">MULTICALL · CONTROLE DE ZONAS</span><h1>Movimentações da frota</h1><p>Histórico automático de zonas e posições na fila.</p></div><span className="mode">{systemStatus ? modeLabels[systemStatus.mode] : 'Conectando…'}</span></header>
  {systemStatus?.mode === 'demo' && <aside>Veículos e zonas fictícios. O modo demonstração não se conecta à Autocab.</aside>}
  {systemStatus?.mode === 'dry' && <aside>Consultando dados reais. As alterações são apenas simuladas; nenhum veículo é movido.</aside>}
  <section className="access"><form onSubmit={event => { event.preventDefault(); setPanelToken(tokenInput); }}><label>Token do painel<input type="password" value={tokenInput} onChange={event => setTokenInput(event.target.value)} autoComplete="off" placeholder="Se exigido pelo servidor"/></label><button>Conectar</button></form><label>Empresa / conexão<select value={connectionId} onChange={event => setConnectionId(event.target.value)}><option value="">Todas as conexões</option>{systemStatus?.connections.map(connection => <option key={connection.id} value={connection.id}>{connection.name}{connection.configured ? '' : ' · chave ausente'}</option>)}</select></label><button onClick={() => setRefreshVersion(version => version + 1)}>Atualizar</button></section>
  {errorMessage && <p className="message" role="alert">{errorMessage} Os dados exibidos podem estar desatualizados.</p>}
  <section className="metrics"><article><span>Histórico armazenado</span><strong>{dashboard.totalChanges}</strong></article><article><span>Confirmadas nos últimos 500</span><strong>{confirmedCount}</strong></article><article><span>Requerem atenção nos últimos 500</span><strong>{attentionCount}</strong></article></section>
  <p className="note" role="status">{systemStatus?.running ? 'Ciclo em execução' : systemStatus?.execution === 'serverless' ? 'Ciclos por agendamento da Vercel' : systemStatus?.autoStart ? 'Rotina automática ativa' : 'Rotina automática desativada'} · {systemStatus && systemStatus.execution !== 'serverless' ? `intervalo após cada ciclo: ${systemStatus.intervalMs / 1000}s` : ''}{lastUpdated && ` · painel atualizado ${formatDate(lastUpdated)}`}</p>
- <ChangeHistory changes={dashboard.changes}/><section className="grid lower"><CycleHistory cycles={dashboard.cycles}/><ZoneList zones={dashboard.zones}/></section></main>;
+ <ChangeHistory changes={dashboard.changes}/>{dashboard.messages && <DriverMessages messages={dashboard.messages}/>}<section className="grid lower"><CycleHistory cycles={dashboard.cycles}/><ZoneList zones={dashboard.zones}/></section></main>;
 }
 createRoot(document.getElementById('root')!).render(<Dashboard />);

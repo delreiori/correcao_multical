@@ -13,6 +13,8 @@ export class DemoAutocabClient implements AutocabGateway {
     async listVehicleStatuses() { return structuredClone(this.statuses); }
     async listGpsPositions() { return this.statuses.map(status => ({ vehicleId: status.vehicleId, latitude: -23.5, longitude: -46.6 })); }
     async findZoneByCoordinates(_latitude: number, _longitude: number, _companyId?: number): Promise<number | null> { return 2; }
+    sentMessages: { vehicleId: number; message: string }[] = [];
+    async sendDriverMessage(vehicleId: number, message: string) { this.sentMessages.push({ vehicleId, message }); return 200; }
     async applyVehiclePlot(vehicleId: number, zoneId: number, position: number) {
         const vehicleStatus = this.statuses.find(status => status.vehicleId === vehicleId);
         if (!vehicleStatus)

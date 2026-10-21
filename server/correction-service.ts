@@ -4,11 +4,14 @@ import type { AuditStore } from './audit-store.ts';
 import { chooseTargetZone, findOutsideZone, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, VehicleStatus } from '../shared/types.ts';
+import type { DriverMessagesMode } from './config.ts';
+import { notifyQueueChanges } from './driver-messages.ts';
 export interface CorrectionConnection {
     id: string;
     name: string;
     companyId?: number;
     companyName?: string;
+    driverMessages?: boolean;
     gateway: AutocabGateway | null;
 }
 // Resolve o companyId pelo nome da empresa no GET de empresas. Nunca segue sem empresa definida:
@@ -41,7 +44,8 @@ export class CorrectionService {
     private inspectedCount = 0;
     private notes: string[] = [];
     private resolvedCompanyIds = new Map<string, number>();
-    constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode) { this.repository = repository; this.rules = rules; this.mode = mode; }
+    private driverMessagesMode: DriverMessagesMode;
+    constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off') { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; }
     private async loadSnapshot(gateway: AutocabGateway): Promise<FleetSnapshot> {
         const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
         if (new Set(zones.map(zone => zone.id)).size !== zones.length)
@@ -126,22 +130,25 @@ export class CorrectionService {
         return plannedChanges;
     }
     // Uma consulta de status confirma todos os envios do lote.
-    private async verifySentChanges(gateway: AutocabGateway, sentChanges: { change: PlannedChange; changeId: string; httpStatus: number }[]) {
+    // Devolve os status lidos após os envios, reaproveitados no aviso de fila aos motoristas.
+    private async verifySentChanges(gateway: AutocabGateway, sentChanges: { change: PlannedChange; changeId: string; httpStatus: number }[]): Promise<VehicleStatus[] | null> {
         if (sentChanges.length === 0)
-            return;
-        let latestStatuses: Map<number, VehicleStatus>;
+            return null;
+        let statusList: VehicleStatus[];
         try {
-            latestStatuses = new Map((await gateway.listVehicleStatuses()).map(status => [status.vehicleId, status]));
+            statusList = await gateway.listVehicleStatuses();
         }
         catch {
             for (const { changeId, httpStatus } of sentChanges)
                 await this.repository.finishChange(changeId, 'unconfirmed', httpStatus, 'POST aceito; consulta de confirmação falhou. Não repetir automaticamente.');
-            return;
+            return null;
         }
+        const latestStatuses = new Map(statusList.map(status => [status.vehicleId, status]));
         for (const { change, changeId, httpStatus } of sentChanges) {
             const isConfirmed = latestStatuses.get(change.vehicleId)?.zoneId === change.targetZoneId;
             await this.repository.finishChange(changeId, isConfirmed ? 'confirmed' : 'unconfirmed', httpStatus, isConfirmed ? 'Zona confirmada após envio; posição enviada registrada no histórico.' : 'POST aceito; zona ainda não confirmada. Veículo bloqueado para nova tentativa automática.');
         }
+        return statusList;
     }
     private async recordSendFailure(changeId: string, error: unknown) {
         const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
@@ -214,6 +221,7 @@ export class CorrectionService {
             const reservedPositions = new Map<number, number>();
             const sentChanges: { change: PlannedChange; changeId: string; httpStatus: number }[] = [];
             const latestStatuses = this.mode === 'live' && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
+            let statusesAfterSend: VehicleStatus[] | null = null;
             try {
                 for (const change of changes) {
                     if (Date.now() > this.deadline - 15000) {
@@ -225,7 +233,18 @@ export class CorrectionService {
                 }
             }
             finally {
-                await this.verifySentChanges(gateway, sentChanges);
+                statusesAfterSend = await this.verifySentChanges(gateway, sentChanges);
+            }
+            if (connection.driverMessages && connection.companyId !== undefined) {
+                // Falha no aviso não desfaz a correção; fica registrada no detalhe do ciclo.
+                try {
+                    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter(vehicle => vehicle.companyId === connection.companyId), rules: this.rules });
+                    if (result.messages > 0)
+                        this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ''}`);
+                }
+                catch (error) {
+                    this.notes.push(`avisos de fila não enviados: ${safeErrorMessage(error)}`);
+                }
             }
             if (this.deferred)
                 this.notes.push('Tempo do ciclo esgotado; veículos restantes serão retomados no próximo ciclo.');

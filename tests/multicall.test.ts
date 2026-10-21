@@ -127,3 +127,57 @@ test('as empresas da mesma chave reaproveitam uma única leitura da frota no cic
     assert.equal(repository.getDashboard().changes.length, 2);
     repository.close();
 });
+// Arcoverde: zona Praia (11) com A1 e A2 livres e A3 ocupado; A9 livre na zona Centro (10).
+function createArcoverdeQueue() {
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 301, zoneId: 11, queuePosition: 1, status: 'Available', hasPenalty: false },
+        { vehicleId: 302, zoneId: 11, queuePosition: 2, status: 'Available', hasPenalty: false },
+        { vehicleId: 303, zoneId: 11, queuePosition: 3, status: 'BusyMeterOn', hasPenalty: false },
+        { vehicleId: 309, zoneId: 10, queuePosition: 1, status: 'Available', hasPenalty: false },
+    ];
+    gateway.listZones = async () => [{ id: 10, name: 'Centro', companyId: 1 }, { id: 11, name: 'Praia', companyId: 1 }];
+    gateway.listVehicles = async () => [{ id: 301, callsign: 'A1', companyId: 1 }, { id: 302, callsign: 'A2', companyId: 1 }, { id: 303, callsign: 'A3', companyId: 1 }, { id: 309, callsign: 'A9', companyId: 1 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [];
+    const setStatuses = (next: typeof statuses) => { statuses = next; };
+    return { gateway, setStatuses, statuses: () => statuses };
+}
+test('Arcoverde avisa só os motoristas livres da zona cuja fila mudou, com a ordem da fila', async () => {
+    const { gateway, setStatuses, statuses } = createArcoverdeQueue();
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'live', 'live');
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, companyName: 'Arcoverde', driverMessages: true, gateway };
+    await service.runConnection(connection);
+    assert.equal(gateway.sentMessages.length, 0, 'primeira leitura só guarda a fila');
+    // A2 passa à frente de A1 na Praia; Centro não muda.
+    setStatuses(statuses().map(status => status.vehicleId === 301 ? { ...status, queuePosition: 2 } : status.vehicleId === 302 ? { ...status, queuePosition: 1 } : status));
+    await service.runConnection(connection);
+    assert.deepEqual(gateway.sentMessages.map(message => message.vehicleId).sort(), [301, 302]);
+    const toA1 = gateway.sentMessages.find(message => message.vehicleId === 301)!.message;
+    assert.match(toA1, /ARCOVERDE - Fila Praia atualizada\. Você é o 2º\. 1º A2 \| 2º A1$/);
+    assert.ok(!toA1.includes('A3'), 'ocupado não aparece na fila');
+    const logged = repository.getDashboard().messages ?? [];
+    assert.equal(logged.length, 2);
+    assert.ok(logged.every(message => message.outcome === 'sent' && message.zoneName === 'Praia'));
+    await service.runConnection(connection);
+    assert.equal(gateway.sentMessages.length, 2, 'fila igual não repete a mensagem');
+    repository.close();
+});
+test('avisos ficam só registrados fora do modo live e outras empresas não recebem', async () => {
+    const { gateway, setStatuses, statuses } = createArcoverdeQueue();
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'dry', 'live');
+    const arcoverde = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
+    const saoConrado = { id: 'sao-conrado', name: 'São Conrado', companyId: 1, gateway };
+    await service.runConnection(arcoverde);
+    await service.runConnection(saoConrado);
+    setStatuses(statuses().filter(status => status.vehicleId !== 301));
+    await service.runConnection(arcoverde);
+    await service.runConnection(saoConrado);
+    assert.equal(gateway.sentMessages.length, 0);
+    const logged = repository.getDashboard().messages ?? [];
+    assert.deepEqual(logged.map(message => [message.connectionId, message.callsign, message.outcome]), [['arcoverde', 'A2', 'simulated']]);
+    assert.match(logged[0].message, /Você é o 1º\. 1º A2$/);
+    repository.close();
+});

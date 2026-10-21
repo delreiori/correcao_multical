@@ -1,4 +1,5 @@
-import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, Zone, DashboardData } from '../shared/types.ts';
+import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, Zone, DashboardData, DriverMessageLog } from '../shared/types.ts';
+export type NewDriverMessage = Omit<DriverMessageLog, 'id' | 'createdAt'>;
 type Awaitable<Value> = Value | Promise<Value>;
 export interface AuditStore {
     recoverInterruptedCycles(): Awaitable<void>;
@@ -11,4 +12,7 @@ export interface AuditStore {
     getDashboard(connectionId?: string | null): Awaitable<DashboardData>;
     getVehicleCursor?(connectionId: string): Promise<number>;
     saveVehicleCursor?(connectionId: string, vehicleId: number): Promise<void>;
+    getZoneQueueSignatures?(connectionId: string): Awaitable<Map<number, string>>;
+    saveZoneQueueSignature?(connectionId: string, zoneId: number, signature: string): Awaitable<void>;
+    recordDriverMessage?(message: NewDriverMessage): Awaitable<void>;
 }
