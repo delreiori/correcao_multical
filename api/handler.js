@@ -805,7 +805,7 @@ var CorrectionService = class {
       inspected = this.inspectedCount;
       const reservedPositions = /* @__PURE__ */ new Map();
       const sentChanges = [];
-      const latestStatuses = this.mode === "live" && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
+      const latestStatuses = this.mode !== "dry" && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
       let statusesAfterSend = null;
       try {
         for (const change of changes) {

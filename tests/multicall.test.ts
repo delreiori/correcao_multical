@@ -301,3 +301,12 @@ test('ringback usa o endpoint RingBack A Vehicle', async () => {
     assert.equal(await client.ringbackVehicle(5013), 200);
     assert.deepEqual(request, { path: '/vehicle/v1/vehicles/5013/ringback', body: { VehicleId: 5013 } });
 });
+test('modo demo aplica as mudanças na frota fictícia em vez de ignorá-las', async () => {
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'demo');
+    await service.runConnection({ id: 'demo', name: 'Demo', gateway: new DemoAutocabClient() });
+    const changes = repository.getDashboard().changes;
+    assert.equal(changes.length, 2);
+    assert.ok(changes.every(change => change.outcome === 'confirmed'));
+    repository.close();
+});

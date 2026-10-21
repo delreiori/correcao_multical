@@ -223,7 +223,7 @@ export class CorrectionService {
             // relidos uma vez antes do lote para cancelar veículos que mudaram desde o planejamento.
             const reservedPositions = new Map<number, number>();
             const sentChanges: { change: PlannedChange; changeId: string; httpStatus: number }[] = [];
-            const latestStatuses = this.mode === 'live' && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
+            const latestStatuses = this.mode !== 'dry' && changes.length > 0 ? await gateway.listVehicleStatuses() : [];
             let statusesAfterSend: VehicleStatus[] | null = null;
             try {
                 for (const change of changes) {
