@@ -154,14 +154,6 @@ function readDriverMessageFields() {
     throw new Error('AUTOCAB_DRIVER_MESSAGE_FIELDS deve ser um objeto JSON, ex.: {"urgent":true}');
   return fields;
 }
-function readDriverMessagesRingback() {
-  const value = (process.env.DRIVER_MESSAGES_RINGBACK ?? "").trim();
-  if (value === "" || value.toLowerCase() === "off")
-    return null;
-  if (value.toLowerCase() === "all" || value === "*")
-    return [];
-  return value.split(",").map((recipient) => recipient.trim()).filter(Boolean);
-}
 function readDriverMessagePath() {
   const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || "/vehicle/v1/vehicles/message";
   if (!path.startsWith("/"))
@@ -192,8 +184,7 @@ function readConfiguration() {
     driverMessagePath: readDriverMessagePath(),
     driverMessageFields: readDriverMessageFields(),
     driverMessageRecipients: readDriverMessageRecipients(),
-    driverMessagesTop: readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 7),
-    driverMessagesRingback: readDriverMessagesRingback(),
+    driverMessagesTop: process.env.DRIVER_MESSAGES_TOP?.trim() ? readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 1) : null,
     connections: readConnections()
   };
 }
@@ -349,12 +340,6 @@ var AutocabClient = class {
     await response.arrayBuffer();
     return response.status;
   }
-  // "RingBack A Vehicle": faz o terminal do motorista tocar. Única chamada sonora documentada na Vehicle API.
-  async ringbackVehicle(vehicleId) {
-    const response = await this.sendRequest(`/vehicle/v1/vehicles/${vehicleId}/ringback`, "POST", { VehicleId: vehicleId });
-    await response.arrayBuffer();
-    return response.status;
-  }
 };
 
 // server/demo.ts
@@ -386,11 +371,6 @@ var DemoAutocabClient = class {
   sentMessages = [];
   async sendDriverMessage(vehicleId, message) {
     this.sentMessages.push({ vehicleId, message });
-    return 200;
-  }
-  ringbacks = [];
-  async ringbackVehicle(vehicleId) {
-    this.ringbacks.push(vehicleId);
     return 200;
   }
   async applyVehiclePlot(vehicleId, zoneId, position) {
@@ -553,15 +533,13 @@ function buildQueueMessage(companyName, queue, recipientIndex, listedDrivers = 7
 async function notifyQueueChanges(options) {
   const { store, gateway, connectionId } = options;
   if (options.messagesMode === "off" || !store.getZoneQueueSignatures || !store.saveZoneQueueSignature || !store.recordDriverMessage)
-    return { zonesChanged: 0, messages: 0, failed: 0, ringbacks: 0, ringbacksFailed: 0 };
+    return { zonesChanged: 0, messages: 0, failed: 0 };
   const sendForReal = options.messagesMode === "live" && options.mode !== "demo";
   const allowed = options.recipients ? new Set(options.recipients) : null;
-  const topDrivers = options.topDrivers ?? 7;
+  const topDrivers = options.topDrivers ?? null;
   const vehiclesById = new Map(options.vehicles.map((vehicle) => [vehicle.id, vehicle]));
   const previousSignatures = await store.getZoneQueueSignatures(connectionId);
-  let zonesChanged = 0, messages = 0, failed = 0, ringbacks = 0, ringbacksFailed = 0;
-  const ringback = options.ringback ?? null;
-  const shouldRingback = (driver) => ringback !== null && (ringback.length === 0 || ringback.includes(driver.callsign) || ringback.includes(String(driver.vehicleId)));
+  let zonesChanged = 0, messages = 0, failed = 0;
   for (const queue of buildZoneQueues(options.zones, options.statuses, vehiclesById, options.rules)) {
     const signature = queueSignature(queue);
     const previous = previousSignatures.get(queue.zone.id);
@@ -571,21 +549,18 @@ async function notifyQueueChanges(options) {
     if (previous === void 0 || queue.drivers.length === 0)
       continue;
     const previousPositions = new Map(previous.split(",").filter(Boolean).map((vehicleId, index) => [Number(vehicleId), index]));
-    const recipients = queue.drivers.slice(0, topDrivers).map((driver, queuePosition) => ({ driver, queuePosition })).filter(({ driver, queuePosition }) => previousPositions.get(driver.vehicleId) !== queuePosition).filter(({ driver }) => !allowed || allowed.has(driver.callsign) || allowed.has(String(driver.vehicleId)));
+    const recipients = queue.drivers.slice(0, topDrivers ?? void 0).map((driver, queuePosition) => ({ driver, queuePosition })).filter(({ driver, queuePosition }) => previousPositions.has(driver.vehicleId) && previousPositions.get(driver.vehicleId) !== queuePosition).filter(({ driver }) => !allowed || allowed.has(driver.callsign) || allowed.has(String(driver.vehicleId)));
     if (recipients.length === 0)
       continue;
     zonesChanged++;
     for (let start = 0; start < recipients.length; start += MESSAGE_CONCURRENCY) {
       await Promise.all(recipients.slice(start, start + MESSAGE_CONCURRENCY).map(async ({ driver, queuePosition }) => {
-        const message = buildQueueMessage(options.companyName, queue, queuePosition, topDrivers);
+        const message = buildQueueMessage(options.companyName, queue, queuePosition);
         let outcome = "simulated", httpStatus = null;
         if (sendForReal) {
           try {
             httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
             outcome = "sent";
-            if (shouldRingback(driver)) {
-              await gateway.ringbackVehicle(driver.vehicleId).then(() => ringbacks++, () => ringbacksFailed++);
-            }
           } catch (error) {
             httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
             outcome = "failed";
@@ -597,7 +572,7 @@ async function notifyQueueChanges(options) {
       }));
     }
   }
-  return { zonesChanged, messages, failed, ringbacks, ringbacksFailed };
+  return { zonesChanged, messages, failed };
 }
 
 // server/correction-service.ts
@@ -632,15 +607,13 @@ var CorrectionService = class {
   driverMessagesMode;
   driverMessageRecipients;
   driverMessagesTop;
-  driverMessagesRingback;
-  constructor(repository, rules, mode, driverMessagesMode = "off", driverMessageRecipients = null, driverMessagesTop = 7, driverMessagesRingback = null) {
+  constructor(repository, rules, mode, driverMessagesMode = "off", driverMessageRecipients = null, driverMessagesTop = null) {
     this.repository = repository;
     this.rules = rules;
     this.mode = mode;
     this.driverMessagesMode = driverMessagesMode;
     this.driverMessageRecipients = driverMessageRecipients;
     this.driverMessagesTop = driverMessagesTop;
-    this.driverMessagesRingback = driverMessagesRingback;
   }
   async loadSnapshot(gateway) {
     const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
@@ -821,9 +794,9 @@ var CorrectionService = class {
       }
       if (connection.driverMessages && connection.companyId !== void 0) {
         try {
-          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop, ringback: this.driverMessagesRingback });
+          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
           if (result.messages > 0)
-            this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}${result.ringbacks + result.ringbacksFailed ? `; ringback ${result.ringbacks} ok${result.ringbacksFailed ? `, ${result.ringbacksFailed} falharam` : ""}` : ""}`);
+            this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
         } catch (error) {
           this.notes.push(`avisos de fila n\xE3o enviados: ${safeErrorMessage(error)}`);
         }
@@ -940,7 +913,7 @@ async function createNeonRuntime() {
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, 4e3, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
     return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
   });
-  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.driverMessagesRingback);
+  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop);
   const runner = new NeonCycleRunner(repository, service, connections);
   return { configuration, repository, connections, runner, close: () => pool.end() };
 }

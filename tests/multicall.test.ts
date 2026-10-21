@@ -235,71 +235,47 @@ test('campos de urgência da mensagem podem ser trocados por AUTOCAB_DRIVER_MESS
         else process.env.AUTOCAB_DRIVER_MESSAGE_FIELDS = previous;
     }
 });
-test('só os 7 primeiros recebem e só quando a própria posição muda', async () => {
+test('avisa todos que já estavam na fila e mudaram de posição; quem entra não é avisado nem registrado', async () => {
     const gateway = new DemoAutocabClient();
     const ids = Array.from({ length: 9 }, (_, index) => 401 + index);
     let order = [...ids];
     gateway.listZones = async () => [{ id: 11, name: 'Praia', companyId: 1 }];
-    gateway.listVehicles = async () => ids.map(id => ({ id, callsign: 'C' + id, companyId: 1 }));
+    gateway.listVehicles = async () => [...ids, 499].map(id => ({ id, callsign: 'C' + id, companyId: 1 }));
     gateway.listVehicleStatuses = async () => order.map((vehicleId, index) => ({ vehicleId, zoneId: 11, queuePosition: index + 1, status: 'Available', hasPenalty: false }));
     gateway.listGpsPositions = async () => [];
     const repository = new AuditRepository(':memory:');
     const service = new CorrectionService(repository, rules, 'live', 'live');
     const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
     await service.runConnection(connection);
-    // Troca só o 8º com o 9º: ninguém entre os 7 primeiros mudou.
-    order = [...ids.slice(0, 7), ids[8], ids[7]];
+    // Um carro novo entra no fim da fila: ninguém mudou de posição e o novo não é avisado.
+    order = [...ids, 499];
     await service.runConnection(connection);
     assert.equal(gateway.sentMessages.length, 0);
-    // O 3º passa a 2º e o 2º a 3º; o 1º e os demais continuam no lugar.
-    order = [order[0], order[2], order[1], ...order.slice(3)];
+    assert.equal((repository.getDashboard().messages ?? []).length, 0);
+    // O 8º e o 9º trocam: só os dois recebem, mesmo fora dos 7 primeiros.
+    order = [...ids.slice(0, 7), ids[8], ids[7], 499];
     await service.runConnection(connection);
-    assert.deepEqual(gateway.sentMessages.map(message => message.vehicleId).sort(), [402, 403]);
-    assert.match(gateway.sentMessages[0].message, /1º C401 \| 2º C403 \| 3º C402 \| 4º C404 \| 5º C405 \| 6º C406 \| 7º C407 \| \+2$/);
-    // O 1º sai da zona: todos sobem e os 7 primeiros novos recebem (o 8º entra no grupo).
-    order = order.slice(1);
+    assert.deepEqual(gateway.sentMessages.map(message => message.vehicleId).sort(), [408, 409]);
+    assert.match(gateway.sentMessages.find(message => message.vehicleId === 409)!.message, /Você é o 8º\. 1º C401 \| .* \| 7º C407 \| \+3$/);
+    // O 1º sai da zona: todos os que ficaram sobem e recebem, inclusive o último que entrou.
     gateway.sentMessages.length = 0;
+    order = order.slice(1);
     await service.runConnection(connection);
-    assert.equal(gateway.sentMessages.length, 7);
+    assert.equal(gateway.sentMessages.length, 9);
     repository.close();
 });
-test('ringback toca o terminal só de quem recebeu o aviso e está na lista', async () => {
-    const { gateway, setStatuses, statuses } = createArcoverdeQueue();
-    const repository = new AuditRepository(':memory:');
-    const service = new CorrectionService(repository, rules, 'dry', 'live', null, 7, ['A1']);
-    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
-    await service.runConnection(connection);
-    setStatuses(statuses().map(status => status.vehicleId === 301 ? { ...status, queuePosition: 2 } : status.vehicleId === 302 ? { ...status, queuePosition: 1 } : status));
-    await service.runConnection(connection);
-    assert.equal(gateway.sentMessages.length, 2);
-    assert.deepEqual(gateway.ringbacks, [301]);
-    assert.match(repository.getDashboard().cycles[0].detail ?? '', /ringback 1 ok/);
-    repository.close();
-});
-test('DRIVER_MESSAGES_RINGBACK aceita off, all e lista', () => {
-    const previous = process.env.DRIVER_MESSAGES_RINGBACK;
+test('DRIVER_MESSAGES_TOP é opcional e limita o aviso aos primeiros da fila', () => {
+    const previous = process.env.DRIVER_MESSAGES_TOP;
     try {
-        delete process.env.DRIVER_MESSAGES_RINGBACK;
-        assert.equal(readConfiguration().driverMessagesRingback, null);
-        process.env.DRIVER_MESSAGES_RINGBACK = 'all';
-        assert.deepEqual(readConfiguration().driverMessagesRingback, []);
-        process.env.DRIVER_MESSAGES_RINGBACK = '5013';
-        assert.deepEqual(readConfiguration().driverMessagesRingback, ['5013']);
+        delete process.env.DRIVER_MESSAGES_TOP;
+        assert.equal(readConfiguration().driverMessagesTop, null);
+        process.env.DRIVER_MESSAGES_TOP = '7';
+        assert.equal(readConfiguration().driverMessagesTop, 7);
     }
     finally {
-        if (previous === undefined) delete process.env.DRIVER_MESSAGES_RINGBACK;
-        else process.env.DRIVER_MESSAGES_RINGBACK = previous;
+        if (previous === undefined) delete process.env.DRIVER_MESSAGES_TOP;
+        else process.env.DRIVER_MESSAGES_TOP = previous;
     }
-});
-test('ringback usa o endpoint RingBack A Vehicle', async () => {
-    let request: { path: string; body: unknown } | null = null;
-    const fakeFetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-        request = { path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) };
-        return new Response(null, { status: 200 });
-    }) as typeof fetch;
-    const client = new AutocabClient('https://autocab-api.azure-api.net', 'key', fakeFetch);
-    assert.equal(await client.ringbackVehicle(5013), 200);
-    assert.deepEqual(request, { path: '/vehicle/v1/vehicles/5013/ringback', body: { VehicleId: 5013 } });
 });
 test('modo demo aplica as mudanças na frota fictícia em vez de ignorá-las', async () => {
     const repository = new AuditRepository(':memory:');

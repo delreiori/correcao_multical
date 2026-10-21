@@ -26,10 +26,8 @@ export interface AppConfig {
     driverMessageFields: Record<string, unknown>;
     // Callsigns ou IDs que recebem os avisos; null = todos os motoristas livres da zona.
     driverMessageRecipients: string[] | null;
-    // Só os N primeiros da fila recebem o aviso quando a posição deles muda.
-    driverMessagesTop: number;
-    // Ringback após o aviso: null = desligado, [] = todos, lista de callsigns/IDs = só esses.
-    driverMessagesRingback: string[] | null;
+    // Limita o aviso aos N primeiros da fila; null (padrão) = todos.
+    driverMessagesTop: number | null;
     connections: ConnectionConfig[];
 }
 // Empresas da Multicall corrigidas por padrão. Todas usam a mesma Subscription Key; o rastreio
@@ -113,15 +111,6 @@ function readDriverMessageFields(): Record<string, unknown> {
         throw new Error('AUTOCAB_DRIVER_MESSAGE_FIELDS deve ser um objeto JSON, ex.: {"urgent":true}');
     return fields as Record<string, unknown>;
 }
-// A mensagem pela API não toca no terminal; o ringback faz tocar. off (padrão), all ou lista (ex.: 5013).
-function readDriverMessagesRingback(): string[] | null {
-    const value = (process.env.DRIVER_MESSAGES_RINGBACK ?? '').trim();
-    if (value === '' || value.toLowerCase() === 'off')
-        return null;
-    if (value.toLowerCase() === 'all' || value === '*')
-        return [];
-    return value.split(',').map(recipient => recipient.trim()).filter(Boolean);
-}
 function readDriverMessagePath() {
     const path = process.env.AUTOCAB_DRIVER_MESSAGE_PATH || '/vehicle/v1/vehicles/message';
     if (!path.startsWith('/'))
@@ -141,5 +130,5 @@ export function readConfiguration(): AppConfig {
         protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA').split(',').map(name => name.trim()).filter(Boolean),
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
-        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageFields: readDriverMessageFields(), driverMessageRecipients: readDriverMessageRecipients(), driverMessagesTop: readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 7), driverMessagesRingback: readDriverMessagesRingback(), connections: readConnections() };
+        driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageFields: readDriverMessageFields(), driverMessageRecipients: readDriverMessageRecipients(), driverMessagesTop: process.env.DRIVER_MESSAGES_TOP?.trim() ? readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 1) : null, connections: readConnections() };
 }

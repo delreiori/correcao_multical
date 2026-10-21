@@ -29,9 +29,9 @@ export function buildQueueMessage(companyName: string, queue: ZoneQueue, recipie
     const remaining = queue.drivers.length - listedDrivers;
     return `${companyName.toUpperCase()} - Fila ${queue.zone.name} atualizada. Você é o ${recipientIndex + 1}º. ${listed}${remaining > 0 ? ` | +${remaining}` : ''}`;
 }
-// Avisa, entre os primeiros da fila de cada zona (padrão 7), só os motoristas livres cuja posição mudou
-// desde a última leitura, incluindo quem acabou de entrar nesse grupo. Na primeira leitura de uma zona
-// apenas guarda a fila, sem enviar, para não disparar mensagens a toda a frota no deploy.
+// Avisa todo motorista livre que já estava na fila da zona e teve a própria posição alterada desde a
+// última leitura (alguém saiu ou entrou à frente dele). Quem acabou de entrar na fila não é avisado nem
+// registrado. Na primeira leitura de uma zona apenas guarda a fila, sem enviar.
 export async function notifyQueueChanges(options: {
     store: AuditStore;
     gateway: AutocabGateway;
@@ -46,24 +46,20 @@ export async function notifyQueueChanges(options: {
     rules: ZoneRules;
     // Callsigns ou IDs autorizados a receber; null = todos. A fila listada na mensagem continua completa.
     recipients?: string[] | null;
-    // Quantos primeiros da fila podem receber o aviso.
-    topDrivers?: number;
-    // Ringback após a mensagem, para o terminal tocar: null = desligado, [] = todos, lista = só esses.
-    ringback?: string[] | null;
-}): Promise<{ zonesChanged: number; messages: number; failed: number; ringbacks: number; ringbacksFailed: number }> {
+    // Limita o aviso aos N primeiros da fila; null = todos.
+    topDrivers?: number | null;
+}): Promise<{ zonesChanged: number; messages: number; failed: number }> {
     const { store, gateway, connectionId } = options;
     if (options.messagesMode === 'off' || !store.getZoneQueueSignatures || !store.saveZoneQueueSignature || !store.recordDriverMessage)
-        return { zonesChanged: 0, messages: 0, failed: 0, ringbacks: 0, ringbacksFailed: 0 };
+        return { zonesChanged: 0, messages: 0, failed: 0 };
     // Envio real com DRIVER_MESSAGES_MODE=live, mesmo com as correções em dry, para testar com poucos
     // motoristas; nunca em demo. Fora disso apenas registra.
     const sendForReal = options.messagesMode === 'live' && options.mode !== 'demo';
     const allowed = options.recipients ? new Set(options.recipients) : null;
-    const topDrivers = options.topDrivers ?? 7;
+    const topDrivers = options.topDrivers ?? null;
     const vehiclesById = new Map(options.vehicles.map(vehicle => [vehicle.id, vehicle]));
     const previousSignatures = await store.getZoneQueueSignatures(connectionId);
-    let zonesChanged = 0, messages = 0, failed = 0, ringbacks = 0, ringbacksFailed = 0;
-    const ringback = options.ringback ?? null;
-    const shouldRingback = (driver: { vehicleId: number; callsign: string }) => ringback !== null && (ringback.length === 0 || ringback.includes(driver.callsign) || ringback.includes(String(driver.vehicleId)));
+    let zonesChanged = 0, messages = 0, failed = 0;
     for (const queue of buildZoneQueues(options.zones, options.statuses, vehiclesById, options.rules)) {
         const signature = queueSignature(queue);
         const previous = previousSignatures.get(queue.zone.id);
@@ -73,25 +69,21 @@ export async function notifyQueueChanges(options: {
         if (previous === undefined || queue.drivers.length === 0)
             continue;
         const previousPositions = new Map(previous.split(',').filter(Boolean).map((vehicleId, index) => [Number(vehicleId), index]));
-        const recipients = queue.drivers.slice(0, topDrivers)
+        const recipients = queue.drivers.slice(0, topDrivers ?? undefined)
             .map((driver, queuePosition) => ({ driver, queuePosition }))
-            .filter(({ driver, queuePosition }) => previousPositions.get(driver.vehicleId) !== queuePosition)
+            .filter(({ driver, queuePosition }) => previousPositions.has(driver.vehicleId) && previousPositions.get(driver.vehicleId) !== queuePosition)
             .filter(({ driver }) => !allowed || allowed.has(driver.callsign) || allowed.has(String(driver.vehicleId)));
         if (recipients.length === 0)
             continue;
         zonesChanged++;
         for (let start = 0; start < recipients.length; start += MESSAGE_CONCURRENCY) {
             await Promise.all(recipients.slice(start, start + MESSAGE_CONCURRENCY).map(async ({ driver, queuePosition }) => {
-                const message = buildQueueMessage(options.companyName, queue, queuePosition, topDrivers);
+                const message = buildQueueMessage(options.companyName, queue, queuePosition);
                 let outcome: DriverMessageOutcome = 'simulated', httpStatus: number | null = null;
                 if (sendForReal) {
                     try {
                         httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
                         outcome = 'sent';
-                        if (shouldRingback(driver)) {
-                            // Falha no ringback não invalida a mensagem já entregue; entra no detalhe do ciclo.
-                            await gateway.ringbackVehicle(driver.vehicleId).then(() => ringbacks++, () => ringbacksFailed++);
-                        }
                     }
                     catch (error) {
                         httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
@@ -104,5 +96,5 @@ export async function notifyQueueChanges(options: {
             }));
         }
     }
-    return { zonesChanged, messages, failed, ringbacks, ringbacksFailed };
+    return { zonesChanged, messages, failed };
 }

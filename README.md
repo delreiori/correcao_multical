@@ -17,19 +17,18 @@ Aplicação com Node.js 24+, TypeScript, React e PostgreSQL/Neon na Vercel; SQLi
 
 ## Avisos de fila aos motoristas (Arcoverde)
 
-Na Arcoverde, quando a posição de um dos **7 primeiros motoristas livres** da fila de uma zona muda (pelo sistema ou não), esse motorista recebe uma mensagem da central com a fila atualizada e a própria posição, por exemplo: `ARCOVERDE - Fila Praia atualizada. Você é o 2º. 1º A2 | 2º A1 | 3º A7`. Regras:
+Na Arcoverde, quando a posição de um motorista livre na fila de uma zona muda (pelo sistema ou não), esse motorista recebe uma mensagem urgente da central com a própria posição e a fila atualizada, por exemplo: `ARCOVERDE - Fila Praia atualizada. Você é o 2º. 1º A2 | 2º A1 | 3º A7`. Regras:
 
 - Motorista ocupado (já trabalhando) não recebe e não aparece na fila.
 - Só recebe quem está na zona que mudou; zonas protegidas (NAK, FORA DE AREA) não geram aviso.
 - Fila igual à do último aviso não repete a mensagem. Na primeira leitura de cada zona a fila só é guardada.
-- Só os 7 primeiros da fila podem receber (`DRIVER_MESSAGES_TOP`), e só quem teve a própria posição alterada, incluindo quem acabou de entrar entre os 7. Mudanças do 8º em diante não geram aviso.
+- Só recebe quem já estava na fila e teve a própria posição alterada (alguém saiu, entrou ou foi colocado à frente dele). Vale para todos da fila; `DRIVER_MESSAGES_TOP` limita aos N primeiros, se necessário.
+- Quem acabou de entrar na fila não recebe e o aviso nem é registrado.
 - O texto lista os 7 primeiros e resume o restante como `+N`.
 
 Todos os motoristas livres da zona recebem os avisos. Para testar com poucos motoristas, `DRIVER_MESSAGES_ONLY` restringe a uma lista de callsigns ou IDs separados por vírgula (ex.: `5013`); a fila listada na mensagem continua completa.
 
-`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. `DRIVER_MESSAGES_MODE=live` envia de verdade, mesmo com `AUTOCAB_MODE=dry`, para testar a mensagem sem mover carros. O envio usa "Send Message to Vehicle(s)" da Vehicle API: POST em `/vehicle/v1/vehicles/message` (alterável em `AUTOCAB_DRIVER_MESSAGE_PATH`) com corpo `{ text, vehicles: [vehicleId] }`, uma requisição por motorista porque o texto traz a posição de cada um. A mensagem vai como **urgente** com o campo `urgent: true`; a especificação não documenta esse campo, então ele pode ser trocado em `AUTOCAB_DRIVER_MESSAGE_FIELDS` (JSON) se a Autocab usar outro nome.
-
-A Vehicle API não documenta som nem urgência na mensagem. Para o terminal tocar, `DRIVER_MESSAGES_RINGBACK` faz um "RingBack A Vehicle" (`POST /vehicle/v1/vehicles/{vehicleId}/ringback`) logo depois de cada aviso entregue: `off` (padrão), `all` ou uma lista de callsigns/IDs para testar antes (ex.: `5013`). Confira com um motorista como o terminal exibe o ringback antes de usar `all`. O resultado aparece no detalhe do ciclo. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
+`DRIVER_MESSAGES_MODE=dry` (padrão) só registra os avisos no painel. `DRIVER_MESSAGES_MODE=live` envia de verdade, mesmo com `AUTOCAB_MODE=dry`, para testar a mensagem sem mover carros. O envio usa "Send Message to Vehicle(s)" da Vehicle API: POST em `/vehicle/v1/vehicles/message` (alterável em `AUTOCAB_DRIVER_MESSAGE_PATH`) com corpo `{ text, vehicles: [vehicleId] }`, uma requisição por motorista porque o texto traz a posição de cada um. A mensagem vai como **urgente** com o campo `urgent: true`; a especificação não documenta esse campo, então ele pode ser trocado em `AUTOCAB_DRIVER_MESSAGE_FIELDS` (JSON) se a Autocab usar outro nome. Para ligar os avisos em outra empresa, marque `driverMessages: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
 
 ## Instalação e execução
 
