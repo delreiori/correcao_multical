@@ -24,11 +24,11 @@ export class PostgresAuditRepository implements AuditStore {
         // Claim and audit intent in a single statement before the external request.
         const result = await this.database.query(`WITH claimed AS (
             INSERT INTO reservation_notifications("connectionId","companyId","bookingId",callsign,simulated,"messageId")
-            VALUES($1,$2,$3,'6001',$4,$5) ON CONFLICT DO NOTHING RETURNING "messageId"
+            VALUES($1,$2,$3,$13,$4,$5) ON CONFLICT DO NOTHING RETURNING "messageId"
         ) INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"createdAt")
-            SELECT $5,$1,$6,$7,'6001',0,$8,0,$9,$10,$11,$12 FROM claimed RETURNING id`,
+            SELECT $5,$1,$6,$7,$13,0,$8,0,$9,$10,$11,$12 FROM claimed RETURNING id`,
             [notice.connectionId, notice.companyId, notice.bookingId, notice.simulated, id, notice.cycleId, notice.vehicleId,
-                `Agendamento #${notice.bookingId}`, RESERVATION_MESSAGE, notice.mode, notice.simulated ? 'simulated' : 'pending', new Date().toISOString()]);
+                `Agendamento #${notice.bookingId}`, RESERVATION_MESSAGE, notice.mode, notice.simulated ? 'simulated' : 'pending', new Date().toISOString(), notice.callsign]);
         return result.rows.length ? id : null;
     }
     async finishReservationNotice(id: string, outcome: 'sent' | 'failed' | 'unknown', httpStatus: number | null) {

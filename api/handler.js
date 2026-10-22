@@ -540,8 +540,17 @@ async function notifyReservations(options) {
   const { store, gateway } = options;
   if (!store.reservationMonitorStart || !store.claimReservationNotice || !store.finishReservationNotice || !gateway.searchReservations)
     throw new Error("Avisos de reserva exigem PostgreSQL e Booking Search v2");
-  const recipients = options.vehicles.filter((v) => v.companyId === options.companyId && v.callsign === "6001");
-  if (recipients.length !== 1) throw new Error("Callsign 6001 ausente ou amb\xEDguo na S\xE3o Conrado; nenhum aviso enviado");
+  const byId = /* @__PURE__ */ new Map();
+  const byCallsign = /* @__PURE__ */ new Map();
+  for (const vehicle of options.vehicles.filter((v) => v.companyId === options.companyId)) {
+    if (byCallsign.has(vehicle.callsign) && byCallsign.get(vehicle.callsign) !== vehicle.id || byId.has(vehicle.id) && byId.get(vehicle.id).callsign !== vehicle.callsign)
+      throw new Error("Cadastro de ve\xEDculos amb\xEDguo na S\xE3o Conrado; nenhum aviso enviado");
+    byId.set(vehicle.id, vehicle);
+    byCallsign.set(vehicle.callsign, vehicle.id);
+  }
+  const recipients = [...byId.values()];
+  if (!recipients.length) throw new Error("Nenhum ve\xEDculo encontrado na S\xE3o Conrado; nenhum aviso enviado");
+  const deadline = Math.min(options.deadline ?? Infinity, Date.now() + 45e3);
   const searchStartedAt = options.now ?? /* @__PURE__ */ new Date();
   const startedAt = await store.reservationMonitorStart(options.connectionId, options.companyId, searchStartedAt.toISOString());
   const bookings = await gateway.searchReservations(options.companyId);
@@ -571,38 +580,50 @@ async function notifyReservations(options) {
     return true;
   });
   const result = { sent: 0, simulated: 0, failed: 0 };
-  for (const { b } of eligible) {
-    const simulated = options.messagesMode !== "live";
-    const id = await store.claimReservationNotice({
-      connectionId: options.connectionId,
-      companyId: options.companyId,
-      bookingId: b.id,
-      cycleId: options.cycleId,
-      vehicleId: recipients[0].id,
-      mode: options.mode,
-      simulated
-    });
-    if (!id) {
-      counts.duplicate++;
-      continue;
+  let deferred = false;
+  sending: for (const { b } of eligible) {
+    for (let offset = 0; offset < recipients.length; offset += 4) {
+      if (Date.now() >= deadline) {
+        deferred = true;
+        break sending;
+      }
+      const outcomes = await Promise.allSettled(recipients.slice(offset, offset + 4).map(async (recipient) => {
+        const simulated = options.messagesMode !== "live";
+        const id = await store.claimReservationNotice({
+          connectionId: options.connectionId,
+          companyId: options.companyId,
+          bookingId: b.id,
+          cycleId: options.cycleId,
+          vehicleId: recipient.id,
+          callsign: recipient.callsign,
+          mode: options.mode,
+          simulated
+        });
+        if (!id) {
+          counts.duplicate++;
+          return;
+        }
+        if (simulated) {
+          result.simulated++;
+          return;
+        }
+        let status;
+        try {
+          status = await gateway.sendDriverMessage(recipient.id, RESERVATION_MESSAGE, true);
+        } catch (error) {
+          const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+          await store.finishReservationNotice(id, httpStatus !== null && httpStatus >= 400 && httpStatus < 500 ? "failed" : "unknown", httpStatus);
+          result.failed++;
+          return;
+        }
+        await store.finishReservationNotice(id, "sent", status);
+        result.sent++;
+      }));
+      if (outcomes.some((outcome) => outcome.status === "rejected"))
+        throw new Error("Falha ao registrar avisos de reservas; consulte os envios pendentes no hist\xF3rico");
     }
-    if (simulated) {
-      result.simulated++;
-      continue;
-    }
-    let status;
-    try {
-      status = await gateway.sendDriverMessage(recipients[0].id, RESERVATION_MESSAGE, true);
-    } catch (error) {
-      const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
-      await store.finishReservationNotice(id, httpStatus !== null && httpStatus >= 400 && httpStatus < 500 ? "failed" : "unknown", httpStatus);
-      result.failed++;
-      continue;
-    }
-    await store.finishReservationNotice(id, "sent", status);
-    result.sent++;
   }
-  result.detail = `reservas empresa ${options.companyId}: ${bookings.length} consultadas, ${eligible.length} eleg\xEDveis, ${counts.beforeStart} anteriores ao monitor (${startedAt}), ${counts.tooShort} com menos de 30 min, ${counts.past} vencidas, ${counts.futureCreation} com cria\xE7\xE3o futura, ${counts.otherCompany} de outra empresa, ${counts.duplicate} j\xE1 registradas`;
+  result.detail = `reservas empresa ${options.companyId}: ${bookings.length} consultadas, ${eligible.length} eleg\xEDveis, ${counts.beforeStart} anteriores ao monitor (${startedAt}), ${counts.tooShort} com menos de 30 min, ${counts.past} vencidas, ${counts.futureCreation} com cria\xE7\xE3o futura, ${counts.otherCompany} de outra empresa, ${counts.duplicate} destinat\xE1rios j\xE1 registrados; ${recipients.length} motoristas da S\xE3o Conrado${deferred ? "; destinat\xE1rios restantes ser\xE3o retomados no pr\xF3ximo ciclo" : ""}`;
   const sample = [...bookings].filter((b) => b.companyId === options.companyId).sort((a, b) => timestamp(b.bookedAtTime) - timestamp(a.bookedAtTime)).slice(0, 5);
   if (sample.length) result.detail += `; consulta em ${showProviderTime(now.toISOString())}; ` + sample.map((b) => `reserva #${b.id}${b.bookingType ? " tipo " + b.bookingType : ""}${b.timingSource ? " (hor\xE1rios da " + (b.timingSource === "detail" ? "consulta individual" : "busca") + ")" : ""}: cria\xE7\xE3o ${showProviderTime(b.bookedAtTime)}, pickupDueTimeUtc ${showProviderTime(b.pickupDueTimeUtc)}` + (b.pickupDueTime ? `, pickupDueTime ${showProviderTime(b.pickupDueTime)}` : "")).join("; ");
   return result;
@@ -627,9 +648,9 @@ var PostgresAuditRepository = class {
     const result = await this.database.query(
       `WITH claimed AS (
             INSERT INTO reservation_notifications("connectionId","companyId","bookingId",callsign,simulated,"messageId")
-            VALUES($1,$2,$3,'6001',$4,$5) ON CONFLICT DO NOTHING RETURNING "messageId"
+            VALUES($1,$2,$3,$13,$4,$5) ON CONFLICT DO NOTHING RETURNING "messageId"
         ) INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"createdAt")
-            SELECT $5,$1,$6,$7,'6001',0,$8,0,$9,$10,$11,$12 FROM claimed RETURNING id`,
+            SELECT $5,$1,$6,$7,$13,0,$8,0,$9,$10,$11,$12 FROM claimed RETURNING id`,
       [
         notice.connectionId,
         notice.companyId,
@@ -642,7 +663,8 @@ var PostgresAuditRepository = class {
         RESERVATION_MESSAGE,
         notice.mode,
         notice.simulated ? "simulated" : "pending",
-        (/* @__PURE__ */ new Date()).toISOString()
+        (/* @__PURE__ */ new Date()).toISOString(),
+        notice.callsign
       ]
     );
     return result.rows.length ? id : null;
@@ -1045,9 +1067,10 @@ var CorrectionService = class {
             cycleId,
             vehicles: await gateway.listVehicles(),
             mode: this.mode,
-            messagesMode: this.reservationMessagesMode
+            messagesMode: this.reservationMessagesMode,
+            deadline: this.deadline - 15e3
           });
-          this.notes.push(`${result.detail ? result.detail + "; " : ""}avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
+          this.notes.push(`${result.detail ? result.detail + "; " : ""}avisos de reservas \xE0 S\xE3o Conrado: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
         } catch (error) {
           this.notes.push(`avisos de reservas n\xE3o conclu\xEDdos: ${safeErrorMessage(error)}`);
         }
