@@ -321,6 +321,7 @@ var AutocabClient = class {
     this.driverMessageFields = options.driverMessageFields ?? { urgent: true };
   }
   async sendRequest(path, method = "GET", body) {
+    const operation = `${method} ${new URL(path, this.baseUrl).pathname}`;
     const headers = { "Accept": "application/json", "Ocp-Apim-Subscription-Key": this.subscriptionKey };
     if (body !== void 0)
       headers["Content-Type"] = "application/json";
@@ -328,10 +329,10 @@ var AutocabClient = class {
     try {
       response = await this.requestFetch(new URL(path, this.baseUrl), { method, headers, body: body === void 0 ? void 0 : JSON.stringify(body), signal: AbortSignal.timeout(this.timeoutMs), redirect: "error" });
     } catch {
-      throw new AutocabRequestError("Falha de rede ou timeout na Autocab");
+      throw new AutocabRequestError(`Falha de rede ou timeout na Autocab (${operation})`);
     }
     if (!response.ok)
-      throw new AutocabRequestError(`Autocab respondeu HTTP ${response.status}`, response.status);
+      throw new AutocabRequestError(`Autocab respondeu HTTP ${response.status} (${operation})`, response.status);
     return response;
   }
   async readJson(path) {
@@ -387,7 +388,13 @@ var AutocabClient = class {
           continue;
         if (typeof booking.bookedAtTime !== "string" || typeof booking.pickupDueTimeUtc !== "string")
           throw new AutocabRequestError("Reserva sem hor\xE1rio de cria\xE7\xE3o ou pickupDueTimeUtc");
-        bookings.push({ id: requireIdentifier(booking.id), companyId, bookedAtTime: booking.bookedAtTime, pickupDueTimeUtc: booking.pickupDueTimeUtc });
+        bookings.push({
+          id: requireIdentifier(booking.id),
+          companyId,
+          bookedAtTime: booking.bookedAtTime,
+          pickupDueTimeUtc: booking.pickupDueTimeUtc,
+          ...typeof booking.pickupDueTime === "string" ? { pickupDueTime: booking.pickupDueTime } : {}
+        });
       }
       if (result.continuationToken == null || result.continuationToken === "")
         return bookings;
@@ -481,6 +488,14 @@ function timestamp(value) {
     throw new Error("Hor\xE1rio da reserva inv\xE1lido ou sem fuso hor\xE1rio");
   return Date.parse(value);
 }
+function showProviderTime(value) {
+  try {
+    const time = timestamp(value);
+    return `${new Date(time).toISOString()} (${new Date(time).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })} Bras\xEDlia)`;
+  } catch {
+    return "inv\xE1lido ou sem fuso";
+  }
+}
 async function notifyReservations(options) {
   if (options.messagesMode === "off" || options.mode === "demo") return { sent: 0, simulated: 0, failed: 0 };
   const { store, gateway } = options;
@@ -549,6 +564,8 @@ async function notifyReservations(options) {
     result.sent++;
   }
   result.detail = `reservas empresa ${options.companyId}: ${bookings.length} consultadas, ${eligible.length} eleg\xEDveis, ${counts.beforeStart} anteriores ao monitor (${startedAt}), ${counts.tooShort} com menos de 30 min, ${counts.past} vencidas, ${counts.futureCreation} com cria\xE7\xE3o futura, ${counts.otherCompany} de outra empresa, ${counts.duplicate} j\xE1 registradas`;
+  const sample = [...bookings].filter((b) => b.companyId === options.companyId).sort((a, b) => timestamp(b.bookedAtTime) - timestamp(a.bookedAtTime)).slice(0, 5);
+  if (sample.length) result.detail += `; consulta em ${showProviderTime(now.toISOString())}; ` + sample.map((b) => `reserva #${b.id}: cria\xE7\xE3o ${showProviderTime(b.bookedAtTime)}, pickupDueTimeUtc ${showProviderTime(b.pickupDueTimeUtc)}` + (b.pickupDueTime ? `, pickupDueTime ${showProviderTime(b.pickupDueTime)}` : "")).join("; ");
   return result;
 }
 

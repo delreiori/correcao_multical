@@ -15,6 +15,7 @@ export interface Reservation {
     companyId: number;
     bookedAtTime: string;
     pickupDueTimeUtc: string;
+    pickupDueTime?: string;
 }
 export interface AutocabClientOptions {
     companiesPath?: string;
@@ -95,6 +96,8 @@ export class AutocabClient implements AutocabGateway {
         this.driverMessageFields = options.driverMessageFields ?? { urgent: true };
     }
     private async sendRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<Response> {
+        // Diagnostics identify the operation, never credentials, query values or response bodies.
+        const operation = `${method} ${new URL(path, this.baseUrl).pathname}`;
         const headers: Record<string, string> = { 'Accept': 'application/json', 'Ocp-Apim-Subscription-Key': this.subscriptionKey };
         if (body !== undefined)
             headers['Content-Type'] = 'application/json';
@@ -103,10 +106,10 @@ export class AutocabClient implements AutocabGateway {
             response = await this.requestFetch(new URL(path, this.baseUrl), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(this.timeoutMs), redirect: 'error' });
         }
         catch {
-            throw new AutocabRequestError('Falha de rede ou timeout na Autocab');
+            throw new AutocabRequestError(`Falha de rede ou timeout na Autocab (${operation})`);
         }
         if (!response.ok)
-            throw new AutocabRequestError(`Autocab respondeu HTTP ${response.status}`, response.status);
+            throw new AutocabRequestError(`Autocab respondeu HTTP ${response.status} (${operation})`, response.status);
         return response;
     }
     private async readJson(path: string): Promise<unknown> {
@@ -161,7 +164,8 @@ export class AutocabClient implements AutocabGateway {
                     continue;
                 if (typeof booking.bookedAtTime !== 'string' || typeof booking.pickupDueTimeUtc !== 'string')
                     throw new AutocabRequestError('Reserva sem horário de criação ou pickupDueTimeUtc');
-                bookings.push({ id: requireIdentifier(booking.id), companyId, bookedAtTime: booking.bookedAtTime, pickupDueTimeUtc: booking.pickupDueTimeUtc });
+                bookings.push({ id: requireIdentifier(booking.id), companyId, bookedAtTime: booking.bookedAtTime, pickupDueTimeUtc: booking.pickupDueTimeUtc,
+                    ...(typeof booking.pickupDueTime === 'string' ? { pickupDueTime: booking.pickupDueTime } : {}) });
             }
             if (result.continuationToken == null || result.continuationToken === '')
                 return bookings;
