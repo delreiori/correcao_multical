@@ -35,6 +35,9 @@ test('Booking Search v2 usa empresa, paginação e mensagem urgente restrita ao 
     assert.equal((await client.searchReservations(2)).length, 2);
     assert.equal(requests[0].url, 'https://example.com/booking/v1/1.2/search');
     assert.deepEqual(requests[0].body.companyIds, [2]);
+    assert.ok(Number.isFinite(Date.parse(String(requests[0].body.from))));
+    assert.equal(requests[0].body.to, '9999-12-31T23:59:59.999Z');
+    assert.equal(requests[0].body.from, requests[1].body.from);
     assert.ok((requests[0].body.types as string[]).includes('Advanced'));
     assert.equal(requests[1].body.continuationToken, 'next');
     await client.sendDriverMessage(42, RESERVATION_MESSAGE, true);
@@ -174,6 +177,46 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
             assert.match(result.detail!, /11:13:00 Brasília/);
             assert.match(result.detail!, /pickupDueTime 2026-10-22T17:13:00.000Z/);
             assert.match(result.detail!, /14:13:00 Brasília/);
+        });
+        await t.test('reserva com uma hora de antecedência é recuperada pelo detalhe quando busca mostra horário da criação', async () => {
+            const requests: string[] = [];
+            let sentBody: Record<string, unknown> | undefined;
+            const client = new AutocabClient('https://example.com', 'test', (async (url, init) => {
+                const path = new URL(String(url)).pathname;
+                requests.push(`${init?.method ?? 'GET'} ${path}`);
+                if (path === '/booking/v1/1.2/search') {
+                    const filters = JSON.parse(String(init?.body));
+                    assert.ok(filters.from); assert.ok(filters.to);
+                    return Response.json({ bookings: [{ id: 501, companyId: 2, bookingType: 'Advanced', bookedAtTime: created, pickupDueTimeUtc: created }] });
+                }
+                if (path === '/booking/v1/booking/501') {
+                    // The documented detail response may omit id.
+                    return Response.json({ companyId: 2, bookingType: 'Advanced', bookedAtTime: created, pickupDueTimeUtc: '2026-10-22T11:01:00Z' });
+                }
+                if (path === '/vehicle/v1/vehicles/message') {
+                    sentBody = JSON.parse(String(init?.body));
+                    return new Response(null, { status: 204 });
+                }
+                throw new Error('Unexpected request');
+            }) as typeof fetch);
+            const result = await notifyReservations({ ...base, gateway: client });
+            assert.equal(result.sent, 1);
+            assert.match(result.detail!, /tipo Advanced \(horários da consulta individual\)/);
+            assert.deepEqual(sentBody?.vehicles, [42]);
+            assert.equal(sentBody?.urgent, true);
+            assert.equal(sentBody?.text, RESERVATION_MESSAGE);
+            assert.ok(requests.includes('GET /booking/v1/booking/501'));
+            assert.equal((await notifyReservations({ ...base, gateway: client })).sent, 0);
+        });
+        await t.test('detalhe removido ou de outra empresa nunca dispara aviso', async () => {
+            for (const removed of [true, false]) {
+                const client = new AutocabClient('https://example.com', 'test', (async url => {
+                    if (String(url).endsWith('/1.2/search')) return Response.json({ bookings: [booking(502, created)] });
+                    assert.ok(String(url).endsWith('/booking/502'));
+                    return removed ? new Response(null, { status: 404 }) : Response.json({ ...booking(502, '2026-10-22T11:01:00Z'), companyId: 1 });
+                }) as typeof fetch);
+                assert.equal((await notifyReservations({ ...base, gateway: client })).sent, 0);
+            }
         });
     } finally { await db.close(); }
 });

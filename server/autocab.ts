@@ -16,6 +16,8 @@ export interface Reservation {
     bookedAtTime: string;
     pickupDueTimeUtc: string;
     pickupDueTime?: string;
+    bookingType?: string;
+    timingSource?: 'search' | 'detail';
 }
 export interface AutocabClientOptions {
     companiesPath?: string;
@@ -38,6 +40,20 @@ function requireIdentifier(value: unknown): number {
     return value;
 }
 function optionalIdentifier(value: unknown): number | null { return value == null ? null : requireIdentifier(value); }
+function parseReservation(value: unknown, companyId: number, requestedId?: number): Reservation | null {
+    const booking = requireObject(value);
+    if (booking.companyId !== companyId || booking.archivedBooking != null) return null;
+    const id = requireIdentifier(booking.id ?? requestedId);
+    if (requestedId !== undefined && id !== requestedId)
+        throw new AutocabRequestError('Detalhe retornou ID de reserva diferente do solicitado');
+    if (typeof booking.bookedAtTime !== 'string' || typeof booking.pickupDueTimeUtc !== 'string')
+        throw new AutocabRequestError('Reserva sem horário de criação ou pickupDueTimeUtc');
+    return { id, companyId, bookedAtTime: booking.bookedAtTime, pickupDueTimeUtc: booking.pickupDueTimeUtc,
+        ...(typeof booking.pickupDueTime === 'string' ? { pickupDueTime: booking.pickupDueTime } : {}),
+        // Display only documented type labels, never arbitrary provider strings.
+        ...(['Advanced', 'ASAP'].includes(String(booking.bookingType)) ? { bookingType: String(booking.bookingType) } : {}),
+        timingSource: requestedId === undefined ? 'search' : 'detail' };
+}
 function parseZone(value: unknown): Zone {
     const zone = requireObject(value);
     const name = typeof zone.name === 'string' && zone.name.trim() ? zone.name : zone.descriptor;
@@ -143,38 +159,62 @@ export class AutocabClient implements AutocabGateway {
     }
     async listZones() { return (await this.readArray('/booking/v1/zones')).map(parseZone); }
     // Booking OpenAPI: Search v2, a read-only search despite using POST.
-    // No date window: includes reservations scheduled arbitrarily far ahead.
+    // Explicit future window: do not depend on the provider's implicit search dates.
+    // The ISO upper bound includes all future dates, without a 30/90-day cutoff.
     async searchReservations(companyId: number): Promise<Reservation[]> {
         const bookings: Reservation[] = [];
+        const from = new Date().toISOString();
+        const to = '9999-12-31T23:59:59.999Z';
         const deadline = Date.now() + 20_000;
         let continuationToken: string | undefined;
         const seenTokens = new Set<string>();
         for (let page = 0; page < 50; page++) {
             if (Date.now() > deadline) throw new AutocabRequestError('Tempo da busca de reservas esgotado; nenhum aviso enviado');
             const response = await this.sendRequest('/booking/v1/1.2/search', 'POST', {
+                from, to,
                 companyIds: [companyId], types: ['Advanced', 'Active', 'Mobile', 'Dispatched'],
                 ...(continuationToken ? { continuationToken } : {})
             });
-            const result = requireObject(await response.json());
+            let payload: unknown;
+            try { payload = await response.json(); }
+            catch { throw new AutocabRequestError('Busca de reservas retornou JSON inválido'); }
+            const result = requireObject(payload);
             if (!Array.isArray(result.bookings))
                 throw new AutocabRequestError('Busca de reservas sem lista bookings');
             for (const value of result.bookings) {
-                const booking = requireObject(value);
-                if (booking.companyId !== companyId || booking.archivedBooking != null)
-                    continue;
-                if (typeof booking.bookedAtTime !== 'string' || typeof booking.pickupDueTimeUtc !== 'string')
-                    throw new AutocabRequestError('Reserva sem horário de criação ou pickupDueTimeUtc');
-                bookings.push({ id: requireIdentifier(booking.id), companyId, bookedAtTime: booking.bookedAtTime, pickupDueTimeUtc: booking.pickupDueTimeUtc,
-                    ...(typeof booking.pickupDueTime === 'string' ? { pickupDueTime: booking.pickupDueTime } : {}) });
+                const booking = parseReservation(value, companyId);
+                if (booking) bookings.push(booking);
             }
             if (result.continuationToken == null || result.continuationToken === '')
-                return bookings;
+                return this.confirmReservationTimes(bookings, deadline);
             if (typeof result.continuationToken !== 'string' || seenTokens.has(result.continuationToken))
                 throw new AutocabRequestError('Paginação inválida na busca de reservas');
             continuationToken = result.continuationToken;
             seenTokens.add(continuationToken);
         }
         throw new AutocabRequestError('Busca de reservas excedeu 50 páginas; nenhum aviso enviado');
+    }
+    private async confirmReservationTimes(bookings: Reservation[], deadline: number): Promise<Reservation[]> {
+        const unique = [...new Map(bookings.map(b => [b.id, b])).values()];
+        const confirmed: Reservation[] = [];
+        for (let start = 0; start < unique.length; start += 4) {
+            if (Date.now() > deadline) throw new AutocabRequestError('Tempo de confirmação das reservas esgotado; nenhum aviso enviado');
+            const batch = await Promise.all(unique.slice(start, start + 4).map(async booking => {
+                const leadTime = Date.parse(booking.pickupDueTimeUtc) - Date.parse(booking.bookedAtTime);
+                if (Number.isFinite(leadTime) && leadTime >= 30 * 60_000) return booking;
+                // The detail operation is read-only and can supply an updated pickup time.
+                // If it still represents an immediate trip, the normal eligibility rule rejects it.
+                try {
+                    return parseReservation(await this.readJson(`/booking/v1/booking/${booking.id}`), booking.companyId, booking.id);
+                } catch (error) {
+                    // A reservation removed between search and detail must not trigger a notice.
+                    if (error instanceof AutocabRequestError && error.httpStatus === 404) return null;
+                    throw error;
+                }
+            }));
+            confirmed.push(...batch.filter((booking): booking is Reservation => booking !== null));
+        }
+        return confirmed;
     }
     async listVehicles() { return (await this.readArray('/vehicle/v1/vehicles')).map(parseVehicle); }
     async listVehicleStatuses() { return (await this.readArray('/vehicle/v1/vehiclestatuses')).map(parseVehicleStatus); }

@@ -263,6 +263,25 @@ function requireIdentifier(value) {
 function optionalIdentifier(value) {
   return value == null ? null : requireIdentifier(value);
 }
+function parseReservation(value, companyId, requestedId) {
+  const booking = requireObject(value);
+  if (booking.companyId !== companyId || booking.archivedBooking != null) return null;
+  const id = requireIdentifier(booking.id ?? requestedId);
+  if (requestedId !== void 0 && id !== requestedId)
+    throw new AutocabRequestError("Detalhe retornou ID de reserva diferente do solicitado");
+  if (typeof booking.bookedAtTime !== "string" || typeof booking.pickupDueTimeUtc !== "string")
+    throw new AutocabRequestError("Reserva sem hor\xE1rio de cria\xE7\xE3o ou pickupDueTimeUtc");
+  return {
+    id,
+    companyId,
+    bookedAtTime: booking.bookedAtTime,
+    pickupDueTimeUtc: booking.pickupDueTimeUtc,
+    ...typeof booking.pickupDueTime === "string" ? { pickupDueTime: booking.pickupDueTime } : {},
+    // Display only documented type labels, never arbitrary provider strings.
+    ...["Advanced", "ASAP"].includes(String(booking.bookingType)) ? { bookingType: String(booking.bookingType) } : {},
+    timingSource: requestedId === void 0 ? "search" : "detail"
+  };
+}
 function parseZone(value) {
   const zone = requireObject(value);
   const name = typeof zone.name === "string" && zone.name.trim() ? zone.name : zone.descriptor;
@@ -366,44 +385,64 @@ var AutocabClient = class {
     return (await this.readArray("/booking/v1/zones")).map(parseZone);
   }
   // Booking OpenAPI: Search v2, a read-only search despite using POST.
-  // No date window: includes reservations scheduled arbitrarily far ahead.
+  // Explicit future window: do not depend on the provider's implicit search dates.
+  // The ISO upper bound includes all future dates, without a 30/90-day cutoff.
   async searchReservations(companyId) {
     const bookings = [];
+    const from = (/* @__PURE__ */ new Date()).toISOString();
+    const to = "9999-12-31T23:59:59.999Z";
     const deadline = Date.now() + 2e4;
     let continuationToken;
     const seenTokens = /* @__PURE__ */ new Set();
     for (let page = 0; page < 50; page++) {
       if (Date.now() > deadline) throw new AutocabRequestError("Tempo da busca de reservas esgotado; nenhum aviso enviado");
       const response = await this.sendRequest("/booking/v1/1.2/search", "POST", {
+        from,
+        to,
         companyIds: [companyId],
         types: ["Advanced", "Active", "Mobile", "Dispatched"],
         ...continuationToken ? { continuationToken } : {}
       });
-      const result = requireObject(await response.json());
+      let payload;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new AutocabRequestError("Busca de reservas retornou JSON inv\xE1lido");
+      }
+      const result = requireObject(payload);
       if (!Array.isArray(result.bookings))
         throw new AutocabRequestError("Busca de reservas sem lista bookings");
       for (const value of result.bookings) {
-        const booking = requireObject(value);
-        if (booking.companyId !== companyId || booking.archivedBooking != null)
-          continue;
-        if (typeof booking.bookedAtTime !== "string" || typeof booking.pickupDueTimeUtc !== "string")
-          throw new AutocabRequestError("Reserva sem hor\xE1rio de cria\xE7\xE3o ou pickupDueTimeUtc");
-        bookings.push({
-          id: requireIdentifier(booking.id),
-          companyId,
-          bookedAtTime: booking.bookedAtTime,
-          pickupDueTimeUtc: booking.pickupDueTimeUtc,
-          ...typeof booking.pickupDueTime === "string" ? { pickupDueTime: booking.pickupDueTime } : {}
-        });
+        const booking = parseReservation(value, companyId);
+        if (booking) bookings.push(booking);
       }
       if (result.continuationToken == null || result.continuationToken === "")
-        return bookings;
+        return this.confirmReservationTimes(bookings, deadline);
       if (typeof result.continuationToken !== "string" || seenTokens.has(result.continuationToken))
         throw new AutocabRequestError("Pagina\xE7\xE3o inv\xE1lida na busca de reservas");
       continuationToken = result.continuationToken;
       seenTokens.add(continuationToken);
     }
     throw new AutocabRequestError("Busca de reservas excedeu 50 p\xE1ginas; nenhum aviso enviado");
+  }
+  async confirmReservationTimes(bookings, deadline) {
+    const unique = [...new Map(bookings.map((b) => [b.id, b])).values()];
+    const confirmed = [];
+    for (let start = 0; start < unique.length; start += 4) {
+      if (Date.now() > deadline) throw new AutocabRequestError("Tempo de confirma\xE7\xE3o das reservas esgotado; nenhum aviso enviado");
+      const batch = await Promise.all(unique.slice(start, start + 4).map(async (booking) => {
+        const leadTime = Date.parse(booking.pickupDueTimeUtc) - Date.parse(booking.bookedAtTime);
+        if (Number.isFinite(leadTime) && leadTime >= 30 * 6e4) return booking;
+        try {
+          return parseReservation(await this.readJson(`/booking/v1/booking/${booking.id}`), booking.companyId, booking.id);
+        } catch (error) {
+          if (error instanceof AutocabRequestError && error.httpStatus === 404) return null;
+          throw error;
+        }
+      }));
+      confirmed.push(...batch.filter((booking) => booking !== null));
+    }
+    return confirmed;
   }
   async listVehicles() {
     return (await this.readArray("/vehicle/v1/vehicles")).map(parseVehicle);
@@ -565,7 +604,7 @@ async function notifyReservations(options) {
   }
   result.detail = `reservas empresa ${options.companyId}: ${bookings.length} consultadas, ${eligible.length} eleg\xEDveis, ${counts.beforeStart} anteriores ao monitor (${startedAt}), ${counts.tooShort} com menos de 30 min, ${counts.past} vencidas, ${counts.futureCreation} com cria\xE7\xE3o futura, ${counts.otherCompany} de outra empresa, ${counts.duplicate} j\xE1 registradas`;
   const sample = [...bookings].filter((b) => b.companyId === options.companyId).sort((a, b) => timestamp(b.bookedAtTime) - timestamp(a.bookedAtTime)).slice(0, 5);
-  if (sample.length) result.detail += `; consulta em ${showProviderTime(now.toISOString())}; ` + sample.map((b) => `reserva #${b.id}: cria\xE7\xE3o ${showProviderTime(b.bookedAtTime)}, pickupDueTimeUtc ${showProviderTime(b.pickupDueTimeUtc)}` + (b.pickupDueTime ? `, pickupDueTime ${showProviderTime(b.pickupDueTime)}` : "")).join("; ");
+  if (sample.length) result.detail += `; consulta em ${showProviderTime(now.toISOString())}; ` + sample.map((b) => `reserva #${b.id}${b.bookingType ? " tipo " + b.bookingType : ""}${b.timingSource ? " (hor\xE1rios da " + (b.timingSource === "detail" ? "consulta individual" : "busca") + ")" : ""}: cria\xE7\xE3o ${showProviderTime(b.bookedAtTime)}, pickupDueTimeUtc ${showProviderTime(b.pickupDueTimeUtc)}` + (b.pickupDueTime ? `, pickupDueTime ${showProviderTime(b.pickupDueTime)}` : "")).join("; ");
   return result;
 }
 

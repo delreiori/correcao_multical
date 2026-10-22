@@ -82,7 +82,7 @@ export async function notifyReservations(options: {
     const sample = [...bookings].filter(b => b.companyId === options.companyId)
         .sort((a, b) => timestamp(b.bookedAtTime) - timestamp(a.bookedAtTime)).slice(0, 5);
     if (sample.length) result.detail += `; consulta em ${showProviderTime(now.toISOString())}; ` + sample.map(b =>
-        `reserva #${b.id}: criação ${showProviderTime(b.bookedAtTime)}, pickupDueTimeUtc ${showProviderTime(b.pickupDueTimeUtc)}`
+        `reserva #${b.id}${b.bookingType ? ' tipo ' + b.bookingType : ''}${b.timingSource ? ' (horários da ' + (b.timingSource === 'detail' ? 'consulta individual' : 'busca') + ')' : ''}: criação ${showProviderTime(b.bookedAtTime)}, pickupDueTimeUtc ${showProviderTime(b.pickupDueTimeUtc)}`
         + (b.pickupDueTime ? `, pickupDueTime ${showProviderTime(b.pickupDueTime)}` : '')).join('; ');
     return result;
 }
