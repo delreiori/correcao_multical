@@ -57,6 +57,15 @@ CREATE TABLE IF NOT EXISTS driver_messages (
  "httpStatus" integer, "createdAt" text NOT NULL
 );
 CREATE INDEX IF NOT EXISTS driver_messages_connection_time ON driver_messages("connectionId", "createdAt");
+CREATE TABLE IF NOT EXISTS reservation_monitors (
+ "connectionId" text NOT NULL, "companyId" bigint NOT NULL, "startedAt" text NOT NULL,
+ PRIMARY KEY ("connectionId", "companyId")
+);
+CREATE TABLE IF NOT EXISTS reservation_notifications (
+ "connectionId" text NOT NULL, "companyId" bigint NOT NULL, "bookingId" bigint NOT NULL,
+ callsign text NOT NULL, simulated boolean NOT NULL, "messageId" text NOT NULL,
+ PRIMARY KEY ("connectionId", "companyId", "bookingId", callsign, simulated)
+);
 CREATE INDEX IF NOT EXISTS correction_cycles_started ON correction_cycles("startedAt");
 -- Supabase exp\xF5e o schema public pela API; RLS sem pol\xEDticas bloqueia esse acesso. O dono das
 -- tabelas (a conex\xE3o do backend) continua com acesso normal.
@@ -66,7 +75,9 @@ ALTER TABLE autocab_zones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE correction_lock ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vehicle_cursors ENABLE ROW LEVEL SECURITY;
 ALTER TABLE zone_queue_signatures ENABLE ROW LEVEL SECURITY;
-ALTER TABLE driver_messages ENABLE ROW LEVEL SECURITY;`;
+ALTER TABLE driver_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reservation_monitors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reservation_notifications ENABLE ROW LEVEL SECURITY;`;
   }
 });
 
@@ -198,6 +209,9 @@ function readDriverMessagePath() {
   return path;
 }
 function readConfiguration() {
+  const reservationMessagesMode = process.env.RESERVATION_MESSAGES_MODE || "off";
+  if (!["off", "dry", "live"].includes(reservationMessagesMode))
+    throw new Error("RESERVATION_MESSAGES_MODE deve ser off, dry ou live");
   const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? "dry" : "demo");
   if (!["demo", "dry", "live"].includes(mode))
     throw new Error("AUTOCAB_MODE deve ser demo, dry ou live");
@@ -218,6 +232,7 @@ function readConfiguration() {
     outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? "FORA DE AREA",
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
     autocabTimeoutMs: readPositiveInteger(process.env.AUTOCAB_TIMEOUT_MS, 1e4),
+    reservationMessagesMode,
     driverMessagesMode: readDriverMessagesMode(),
     driverMessagePath: readDriverMessagePath(),
     driverMessageFields: readDriverMessageFields(),
@@ -349,6 +364,40 @@ var AutocabClient = class {
   async listZones() {
     return (await this.readArray("/booking/v1/zones")).map(parseZone);
   }
+  // Booking OpenAPI: Search v2, a read-only search despite using POST.
+  // No date window: includes reservations scheduled arbitrarily far ahead.
+  async searchReservations(companyId) {
+    const bookings = [];
+    const deadline = Date.now() + 2e4;
+    let continuationToken;
+    const seenTokens = /* @__PURE__ */ new Set();
+    for (let page = 0; page < 50; page++) {
+      if (Date.now() > deadline) throw new AutocabRequestError("Tempo da busca de reservas esgotado; nenhum aviso enviado");
+      const response = await this.sendRequest("/booking/v1/1.2/search", "POST", {
+        companyIds: [companyId],
+        types: ["Advanced", "Active", "Mobile", "Dispatched"],
+        ...continuationToken ? { continuationToken } : {}
+      });
+      const result = requireObject(await response.json());
+      if (!Array.isArray(result.bookings))
+        throw new AutocabRequestError("Busca de reservas sem lista bookings");
+      for (const value of result.bookings) {
+        const booking = requireObject(value);
+        if (booking.companyId !== companyId || booking.archivedBooking != null)
+          continue;
+        if (typeof booking.bookedAtTime !== "string" || typeof booking.pickupDueTimeUtc !== "string")
+          throw new AutocabRequestError("Reserva sem hor\xE1rio de cria\xE7\xE3o ou pickupDueTimeUtc");
+        bookings.push({ id: requireIdentifier(booking.id), companyId, bookedAtTime: booking.bookedAtTime, pickupDueTimeUtc: booking.pickupDueTimeUtc });
+      }
+      if (result.continuationToken == null || result.continuationToken === "")
+        return bookings;
+      if (typeof result.continuationToken !== "string" || seenTokens.has(result.continuationToken))
+        throw new AutocabRequestError("Pagina\xE7\xE3o inv\xE1lida na busca de reservas");
+      continuationToken = result.continuationToken;
+      seenTokens.add(continuationToken);
+    }
+    throw new AutocabRequestError("Busca de reservas excedeu 50 p\xE1ginas; nenhum aviso enviado");
+  }
   async listVehicles() {
     return (await this.readArray("/vehicle/v1/vehicles")).map(parseVehicle);
   }
@@ -373,8 +422,8 @@ var AutocabClient = class {
     return response.status;
   }
   // "Send Message to Vehicle(s)" da Vehicle API: mensagem da central para o terminal do motorista.
-  async sendDriverMessage(vehicleId, message) {
-    const response = await this.sendRequest(this.driverMessagePath, "POST", { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [], ...this.driverMessageFields });
+  async sendDriverMessage(vehicleId, message, urgent = false) {
+    const response = await this.sendRequest(this.driverMessagePath, "POST", { companies: [], capabilities: [], zones: [], ...this.driverMessageFields, ...urgent ? { urgent: true, companies: [], capabilities: [], zones: [] } : {}, text: message, vehicles: [vehicleId] });
     await response.arrayBuffer();
     return response.status;
   }
@@ -424,6 +473,58 @@ var DemoAutocabClient = class {
 // server/postgres-repository.ts
 import { randomUUID } from "node:crypto";
 init_postgres_schema();
+
+// server/reservation-messages.ts
+var RESERVATION_MESSAGE = "nova corrida agendada checar tela de agendamentos";
+function timestamp(value) {
+  if (!/(Z|[+-]\d{2}:\d{2})$/i.test(value) || !Number.isFinite(Date.parse(value)))
+    throw new Error("Hor\xE1rio da reserva inv\xE1lido ou sem fuso hor\xE1rio");
+  return Date.parse(value);
+}
+async function notifyReservations(options) {
+  if (options.messagesMode === "off" || options.mode === "demo") return { sent: 0, simulated: 0, failed: 0 };
+  const { store, gateway } = options;
+  if (!store.reservationMonitorStart || !store.claimReservationNotice || !store.finishReservationNotice || !gateway.searchReservations)
+    throw new Error("Avisos de reserva exigem PostgreSQL e Booking Search v2");
+  const recipients = options.vehicles.filter((v) => v.companyId === options.companyId && v.callsign === "6001");
+  if (recipients.length !== 1) throw new Error("Callsign 6001 ausente ou amb\xEDguo na S\xE3o Conrado; nenhum aviso enviado");
+  const now = options.now ?? /* @__PURE__ */ new Date();
+  const startedAt = await store.reservationMonitorStart(options.connectionId, options.companyId, now.toISOString());
+  const bookings = await gateway.searchReservations(options.companyId);
+  const eligible = bookings.map((b) => ({ b, created: timestamp(b.bookedAtTime), due: timestamp(b.pickupDueTimeUtc) })).filter(({ b, created, due }) => b.companyId === options.companyId && created >= timestamp(startedAt) && created <= now.getTime() && due > now.getTime() && due - created >= 30 * 6e4);
+  const result = { sent: 0, simulated: 0, failed: 0 };
+  for (const { b } of eligible) {
+    const simulated = options.messagesMode !== "live";
+    const id = await store.claimReservationNotice({
+      connectionId: options.connectionId,
+      companyId: options.companyId,
+      bookingId: b.id,
+      cycleId: options.cycleId,
+      vehicleId: recipients[0].id,
+      mode: options.mode,
+      simulated
+    });
+    if (!id) continue;
+    if (simulated) {
+      result.simulated++;
+      continue;
+    }
+    let status;
+    try {
+      status = await gateway.sendDriverMessage(recipients[0].id, RESERVATION_MESSAGE, true);
+    } catch (error) {
+      const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+      await store.finishReservationNotice(id, httpStatus !== null && httpStatus >= 400 && httpStatus < 500 ? "failed" : "unknown", httpStatus);
+      result.failed++;
+      continue;
+    }
+    await store.finishReservationNotice(id, "sent", status);
+    result.sent++;
+  }
+  return result;
+}
+
+// server/postgres-repository.ts
 var PostgresAuditRepository = class {
   database;
   constructor(database) {
@@ -432,7 +533,41 @@ var PostgresAuditRepository = class {
   async initialize() {
     await this.database.query(postgresSchema);
   }
+  async reservationMonitorStart(connectionId, companyId, startedAt) {
+    const result = await this.database.query(`INSERT INTO reservation_monitors("connectionId","companyId","startedAt") VALUES($1,$2,$3)
+            ON CONFLICT ("connectionId","companyId") DO UPDATE SET "startedAt"=reservation_monitors."startedAt" RETURNING "startedAt"`, [connectionId, companyId, startedAt]);
+    return String(result.rows[0].startedAt);
+  }
+  async claimReservationNotice(notice) {
+    const id = randomUUID();
+    const result = await this.database.query(
+      `WITH claimed AS (
+            INSERT INTO reservation_notifications("connectionId","companyId","bookingId",callsign,simulated,"messageId")
+            VALUES($1,$2,$3,'6001',$4,$5) ON CONFLICT DO NOTHING RETURNING "messageId"
+        ) INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"createdAt")
+            SELECT $5,$1,$6,$7,'6001',0,$8,0,$9,$10,$11,$12 FROM claimed RETURNING id`,
+      [
+        notice.connectionId,
+        notice.companyId,
+        notice.bookingId,
+        notice.simulated,
+        id,
+        notice.cycleId,
+        notice.vehicleId,
+        `Agendamento #${notice.bookingId}`,
+        RESERVATION_MESSAGE,
+        notice.mode,
+        notice.simulated ? "simulated" : "pending",
+        (/* @__PURE__ */ new Date()).toISOString()
+      ]
+    );
+    return result.rows.length ? id : null;
+  }
+  async finishReservationNotice(id, outcome, httpStatus) {
+    await this.database.query('UPDATE driver_messages SET outcome=$1,"httpStatus"=$2 WHERE id=$3', [outcome, httpStatus, id]);
+  }
   async recoverInterruptedCycles() {
+    await this.database.query(`UPDATE driver_messages SET outcome='unknown' WHERE outcome='pending' AND "zoneId"=0`);
     await this.database.query("UPDATE plot_changes SET outcome='unknown',detail='Execu\xE7\xE3o anterior interrompida; consultar antes de repetir' WHERE outcome='pending'");
     await this.database.query(`UPDATE correction_cycles SET outcome='interrupted',"finishedAt"=$1 WHERE outcome='running'`, [(/* @__PURE__ */ new Date()).toISOString()]);
   }
@@ -501,8 +636,16 @@ var PostgresAuditRepository = class {
   async saveZoneQueueSignature(connectionId, zoneId, signature) {
     await this.database.query('INSERT INTO zone_queue_signatures("connectionId","zoneId",signature,"updatedAt") VALUES($1,$2,$3,$4) ON CONFLICT("connectionId","zoneId") DO UPDATE SET signature=EXCLUDED.signature,"updatedAt"=EXCLUDED."updatedAt"', [connectionId, zoneId, signature, (/* @__PURE__ */ new Date()).toISOString()]);
   }
-  async listDriverMessages(connectionId = null, limit = 1e3) {
-    const result = connectionId ? await this.database.query('SELECT * FROM driver_messages WHERE "connectionId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT $2', [connectionId, limit]) : await this.database.query('SELECT * FROM driver_messages ORDER BY "createdAt" DESC,id DESC LIMIT $1', [limit]);
+  async listDriverMessages(connectionId = null, limit = 1e3, kind) {
+    const conditions = [];
+    const parameters = [];
+    if (connectionId) {
+      parameters.push(connectionId);
+      conditions.push('"connectionId"=$1');
+    }
+    if (kind) conditions.push(`${kind === "queue" ? "NOT " : ""}("zoneId"=0 AND "queuePosition"=0)`);
+    parameters.push(limit);
+    const result = await this.database.query("SELECT * FROM driver_messages" + (conditions.length ? " WHERE " + conditions.join(" AND ") : "") + ` ORDER BY "createdAt" DESC,id DESC LIMIT $${parameters.length}`, parameters);
     return result.rows.map((row) => ({ ...row, vehicleId: Number(row.vehicleId), zoneId: Number(row.zoneId) }));
   }
   async recordDriverMessage(message) {
@@ -650,15 +793,17 @@ var CorrectionService = class {
   notes = [];
   resolvedCompanyIds = /* @__PURE__ */ new Map();
   driverMessagesMode;
+  reservationMessagesMode;
   driverMessageRecipients;
   driverMessagesTop;
-  constructor(repository, rules, mode, driverMessagesMode = "off", driverMessageRecipients = null, driverMessagesTop = null) {
+  constructor(repository, rules, mode, driverMessagesMode = "off", driverMessageRecipients = null, driverMessagesTop = null, reservationMessagesMode = "off") {
     this.repository = repository;
     this.rules = rules;
     this.mode = mode;
     this.driverMessagesMode = driverMessagesMode;
     this.driverMessageRecipients = driverMessageRecipients;
     this.driverMessagesTop = driverMessagesTop;
+    this.reservationMessagesMode = reservationMessagesMode;
   }
   async loadSnapshot(gateway) {
     const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
@@ -816,6 +961,24 @@ var CorrectionService = class {
       if (connection.companyId !== void 0)
         snapshot = { ...snapshot, zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
       await this.repository.saveZones(connection.id, snapshot.zones);
+      if (connection.id === "sao-conrado" && normalizeZoneName(connection.companyName ?? connection.name) === "SAO CONRADO" && connection.companyId !== void 0) {
+        try {
+          const result = await notifyReservations({
+            store: this.repository,
+            gateway,
+            connectionId: connection.id,
+            companyId: connection.companyId,
+            cycleId,
+            vehicles: snapshot.vehicles,
+            mode: this.mode,
+            messagesMode: this.reservationMessagesMode
+          });
+          if (this.reservationMessagesMode !== "off" && this.mode !== "demo")
+            this.notes.push(`avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
+        } catch (error) {
+          this.notes.push(`avisos de reservas n\xE3o conclu\xEDdos: ${safeErrorMessage(error)}`);
+        }
+      }
       if (this.mode === "live")
         await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
       const changes = await this.planChanges(connection, snapshot, gateway);
@@ -1005,7 +1168,7 @@ async function createNeonRuntime() {
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
     return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
   });
-  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop);
+  const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
   const runner = new NeonCycleRunner(repository, service, connections);
   return { configuration, repository, connections, runner, close: () => pool.end() };
 }
@@ -1120,7 +1283,7 @@ function createServerlessHandler(loadRuntime2, runInBackground = runOnVercelInBa
     }
     try {
       if (path === "/api/status") {
-        sendJson(response, 200, { mode: runtime.configuration.mode, running: runtime.runner.running, autoStart: false, intervalMs: runtime.configuration.intervalMs, execution: "serverless", connections: runtime.connections.map((connection) => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) });
+        sendJson(response, 200, { mode: runtime.configuration.mode, reservationMessagesMode: runtime.configuration.reservationMessagesMode ?? "off", running: runtime.runner.running, autoStart: false, intervalMs: runtime.configuration.intervalMs, execution: "serverless", connections: runtime.connections.map((connection) => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) });
         return;
       }
       if (path === "/api/companies") {
@@ -1132,7 +1295,8 @@ function createServerlessHandler(loadRuntime2, runInBackground = runOnVercelInBa
         return;
       }
       if (path === "/api/messages") {
-        sendJson(response, 200, { messages: await runtime.repository.listDriverMessages(query.get("connectionId")) });
+        const kind = query.get("kind");
+        sendJson(response, 200, { messages: await runtime.repository.listDriverMessages(query.get("connectionId"), 1e3, kind === "queue" || kind === "reservations" ? kind : void 0) });
         return;
       }
       if (path === "/api/dashboard") {

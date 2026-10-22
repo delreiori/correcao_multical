@@ -42,7 +42,7 @@ export function createApplication(config: AppConfig, repository: AuditStore, sch
     application.use(express.json({ limit: '16kb' }));
     application.use('/api', (_request, response, next) => { response.set('Cache-Control', 'no-store'); next(); });
     application.use('/api', authenticatePanel(config.panelToken), validateRequestOrigin);
-    application.get('/api/status', (_request, response) => response.json({ mode: config.mode, running: scheduler.running, autoStart: config.autoStart, intervalMs: config.intervalMs, connections: connections.map(connection => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) }));
+    application.get('/api/status', (_request, response) => response.json({ mode: config.mode, reservationMessagesMode: config.reservationMessagesMode ?? 'off', running: scheduler.running, autoStart: config.autoStart, intervalMs: config.intervalMs, connections: connections.map(connection => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) }));
     application.get('/api/companies', async (_request, response) => {
         try {
             response.json(await listCompaniesForConnections(connections));
@@ -53,7 +53,8 @@ export function createApplication(config: AppConfig, repository: AuditStore, sch
     });
     application.get('/api/messages', async (request, response) => {
         const connectionId = typeof request.query.connectionId === 'string' ? request.query.connectionId : null;
-        response.json({ messages: await repository.listDriverMessages?.(connectionId) ?? [] });
+        const kind = request.query.kind;
+        response.json({ messages: await repository.listDriverMessages?.(connectionId, 1000, kind === 'queue' || kind === 'reservations' ? kind : undefined) ?? [] });
     });
     application.get('/api/dashboard', async (request, response) => {
         const connectionId = typeof request.query.connectionId === 'string' ? request.query.connectionId : null;

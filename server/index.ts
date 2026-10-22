@@ -22,7 +22,7 @@ else {
         const gateway = configuration.mode === 'demo' ? new DemoAutocabClient() : subscriptionKey ? new AutocabClient(configuration.baseUrl, subscriptionKey, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
         return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
     });
-    const correctionService = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop);
+    const correctionService = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
     const scheduler = new CorrectionScheduler(correctionService, connections, configuration.intervalMs);
     const application = createApplication(configuration, repository, scheduler, connections);
     const server = application.listen(configuration.port, configuration.host, () => {

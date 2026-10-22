@@ -96,7 +96,7 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>,
         }
         try {
             if (path === '/api/status') {
-                sendJson(response, 200, { mode: runtime.configuration.mode, running: runtime.runner.running, autoStart: false, intervalMs: runtime.configuration.intervalMs, execution: 'serverless', connections: runtime.connections.map(connection => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) });
+                sendJson(response, 200, { mode: runtime.configuration.mode, reservationMessagesMode: runtime.configuration.reservationMessagesMode ?? 'off', running: runtime.runner.running, autoStart: false, intervalMs: runtime.configuration.intervalMs, execution: 'serverless', connections: runtime.connections.map(connection => ({ id: connection.id, name: connection.name, configured: connection.gateway !== null, companyId: connection.companyId, companyName: connection.companyName })) });
                 return;
             }
             if (path === '/api/companies') {
@@ -109,7 +109,8 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>,
                 return;
             }
             if (path === '/api/messages') {
-                sendJson(response, 200, { messages: await runtime.repository.listDriverMessages(query.get('connectionId')) });
+                const kind = query.get('kind');
+                sendJson(response, 200, { messages: await runtime.repository.listDriverMessages(query.get('connectionId'), 1000, kind === 'queue' || kind === 'reservations' ? kind : undefined) });
                 return;
             }
             if (path === '/api/dashboard') {

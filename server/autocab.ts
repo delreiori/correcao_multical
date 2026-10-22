@@ -1,5 +1,6 @@
 import type { Company, Zone, Vehicle, VehicleStatus, VehicleGpsPosition } from '../shared/types.ts';
 export interface AutocabGateway {
+    searchReservations?(companyId: number): Promise<Reservation[]>;
     listCompanies(): Promise<Company[]>;
     listZones(): Promise<Zone[]>;
     listVehicles(): Promise<Vehicle[]>;
@@ -7,7 +8,13 @@ export interface AutocabGateway {
     listGpsPositions(): Promise<VehicleGpsPosition[]>;
     findZoneByCoordinates(latitude: number, longitude: number, companyId?: number): Promise<number | null>;
     applyVehiclePlot(vehicleId: number, zoneId: number, position: number): Promise<number>;
-    sendDriverMessage(vehicleId: number, message: string): Promise<number>;
+    sendDriverMessage(vehicleId: number, message: string, urgent?: boolean): Promise<number>;
+}
+export interface Reservation {
+    id: number;
+    companyId: number;
+    bookedAtTime: string;
+    pickupDueTimeUtc: string;
 }
 export interface AutocabClientOptions {
     companiesPath?: string;
@@ -132,6 +139,39 @@ export class AutocabClient implements AutocabGateway {
         return [...companyIds].sort((left, right) => left - right).map(id => ({ id, name: null }));
     }
     async listZones() { return (await this.readArray('/booking/v1/zones')).map(parseZone); }
+    // Booking OpenAPI: Search v2, a read-only search despite using POST.
+    // No date window: includes reservations scheduled arbitrarily far ahead.
+    async searchReservations(companyId: number): Promise<Reservation[]> {
+        const bookings: Reservation[] = [];
+        const deadline = Date.now() + 20_000;
+        let continuationToken: string | undefined;
+        const seenTokens = new Set<string>();
+        for (let page = 0; page < 50; page++) {
+            if (Date.now() > deadline) throw new AutocabRequestError('Tempo da busca de reservas esgotado; nenhum aviso enviado');
+            const response = await this.sendRequest('/booking/v1/1.2/search', 'POST', {
+                companyIds: [companyId], types: ['Advanced', 'Active', 'Mobile', 'Dispatched'],
+                ...(continuationToken ? { continuationToken } : {})
+            });
+            const result = requireObject(await response.json());
+            if (!Array.isArray(result.bookings))
+                throw new AutocabRequestError('Busca de reservas sem lista bookings');
+            for (const value of result.bookings) {
+                const booking = requireObject(value);
+                if (booking.companyId !== companyId || booking.archivedBooking != null)
+                    continue;
+                if (typeof booking.bookedAtTime !== 'string' || typeof booking.pickupDueTimeUtc !== 'string')
+                    throw new AutocabRequestError('Reserva sem horário de criação ou pickupDueTimeUtc');
+                bookings.push({ id: requireIdentifier(booking.id), companyId, bookedAtTime: booking.bookedAtTime, pickupDueTimeUtc: booking.pickupDueTimeUtc });
+            }
+            if (result.continuationToken == null || result.continuationToken === '')
+                return bookings;
+            if (typeof result.continuationToken !== 'string' || seenTokens.has(result.continuationToken))
+                throw new AutocabRequestError('Paginação inválida na busca de reservas');
+            continuationToken = result.continuationToken;
+            seenTokens.add(continuationToken);
+        }
+        throw new AutocabRequestError('Busca de reservas excedeu 50 páginas; nenhum aviso enviado');
+    }
     async listVehicles() { return (await this.readArray('/vehicle/v1/vehicles')).map(parseVehicle); }
     async listVehicleStatuses() { return (await this.readArray('/vehicle/v1/vehiclestatuses')).map(parseVehicleStatus); }
     async listGpsPositions() { return (await this.readArray('/vehicle/v1/vehiclegpsposition')).map(parseGpsPosition).filter(position => position !== null); }
@@ -150,8 +190,8 @@ export class AutocabClient implements AutocabGateway {
         return response.status;
     }
     // "Send Message to Vehicle(s)" da Vehicle API: mensagem da central para o terminal do motorista.
-    async sendDriverMessage(vehicleId: number, message: string) {
-        const response = await this.sendRequest(this.driverMessagePath, 'POST', { text: message, vehicles: [vehicleId], companies: [], capabilities: [], zones: [], ...this.driverMessageFields });
+    async sendDriverMessage(vehicleId: number, message: string, urgent = false) {
+        const response = await this.sendRequest(this.driverMessagePath, 'POST', { companies: [], capabilities: [], zones: [], ...this.driverMessageFields, ...(urgent ? { urgent: true, companies: [], capabilities: [], zones: [] } : {}), text: message, vehicles: [vehicleId] });
         await response.arrayBuffer();
         return response.status;
     }

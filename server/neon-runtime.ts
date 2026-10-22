@@ -171,7 +171,7 @@ export async function createNeonRuntime() {
         const gateway = configuration.mode === 'demo' ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
         return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
     });
-    const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop);
+    const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
     const runner = new NeonCycleRunner(repository, service, connections);
     return { configuration, repository, connections, runner, close: () => pool.end() };
 }

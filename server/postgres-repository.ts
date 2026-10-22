@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { CYCLE_LEASE_SECONDS } from './execution-limits.ts';
-import type { AuditStore, NewDriverMessage } from './audit-store.ts';
+import type { AuditStore, NewDriverMessage, MessageKind } from './audit-store.ts';
 import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, CycleLog, Zone, SavedZone, DashboardData, DriverMessageLog } from '../shared/types.ts';
 import { postgresSchema } from './postgres-schema.ts';
+import { RESERVATION_MESSAGE } from './reservation-messages.ts';
+import type { ReservationNotice } from './reservation-messages.ts';
 export interface SqlExecutor {
     query(sql: string, parameters?: unknown[]): Promise<{
         rows: Record<string, unknown>[];
@@ -12,7 +14,28 @@ export class PostgresAuditRepository implements AuditStore {
     private database: SqlExecutor;
     constructor(database: SqlExecutor) { this.database = database; }
     async initialize() { await this.database.query(postgresSchema); }
+    async reservationMonitorStart(connectionId: string, companyId: number, startedAt: string) {
+        const result = await this.database.query(`INSERT INTO reservation_monitors("connectionId","companyId","startedAt") VALUES($1,$2,$3)
+            ON CONFLICT ("connectionId","companyId") DO UPDATE SET "startedAt"=reservation_monitors."startedAt" RETURNING "startedAt"`, [connectionId, companyId, startedAt]);
+        return String(result.rows[0].startedAt);
+    }
+    async claimReservationNotice(notice: ReservationNotice) {
+        const id = randomUUID();
+        // Claim and audit intent in a single statement before the external request.
+        const result = await this.database.query(`WITH claimed AS (
+            INSERT INTO reservation_notifications("connectionId","companyId","bookingId",callsign,simulated,"messageId")
+            VALUES($1,$2,$3,'6001',$4,$5) ON CONFLICT DO NOTHING RETURNING "messageId"
+        ) INSERT INTO driver_messages(id,"connectionId","cycleId","vehicleId",callsign,"zoneId","zoneName","queuePosition",message,mode,outcome,"createdAt")
+            SELECT $5,$1,$6,$7,'6001',0,$8,0,$9,$10,$11,$12 FROM claimed RETURNING id`,
+            [notice.connectionId, notice.companyId, notice.bookingId, notice.simulated, id, notice.cycleId, notice.vehicleId,
+                `Agendamento #${notice.bookingId}`, RESERVATION_MESSAGE, notice.mode, notice.simulated ? 'simulated' : 'pending', new Date().toISOString()]);
+        return result.rows.length ? id : null;
+    }
+    async finishReservationNotice(id: string, outcome: 'sent' | 'failed' | 'unknown', httpStatus: number | null) {
+        await this.database.query('UPDATE driver_messages SET outcome=$1,"httpStatus"=$2 WHERE id=$3', [outcome, httpStatus, id]);
+    }
     async recoverInterruptedCycles() {
+        await this.database.query("UPDATE driver_messages SET outcome='unknown' WHERE outcome='pending' AND \"zoneId\"=0");
         // Call only after acquiring the global database lease; never at cold start.
         await this.database.query("UPDATE plot_changes SET outcome='unknown',detail='Execução anterior interrompida; consultar antes de repetir' WHERE outcome='pending'");
         await this.database.query("UPDATE correction_cycles SET outcome='interrupted',\"finishedAt\"=$1 WHERE outcome='running'", [new Date().toISOString()]);
@@ -76,10 +99,14 @@ export class PostgresAuditRepository implements AuditStore {
     async saveZoneQueueSignature(connectionId: string, zoneId: number, signature: string) {
         await this.database.query('INSERT INTO zone_queue_signatures("connectionId","zoneId",signature,"updatedAt") VALUES($1,$2,$3,$4) ON CONFLICT("connectionId","zoneId") DO UPDATE SET signature=EXCLUDED.signature,"updatedAt"=EXCLUDED."updatedAt"', [connectionId, zoneId, signature, new Date().toISOString()]);
     }
-    async listDriverMessages(connectionId: string | null = null, limit = 1000) {
-        const result = connectionId
-            ? await this.database.query('SELECT * FROM driver_messages WHERE "connectionId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT $2', [connectionId, limit])
-            : await this.database.query('SELECT * FROM driver_messages ORDER BY "createdAt" DESC,id DESC LIMIT $1', [limit]);
+    async listDriverMessages(connectionId: string | null = null, limit = 1000, kind?: MessageKind) {
+        const conditions = [];
+        const parameters: unknown[] = [];
+        if (connectionId) { parameters.push(connectionId); conditions.push('"connectionId"=$1'); }
+        if (kind) conditions.push(`${kind === 'queue' ? 'NOT ' : ''}("zoneId"=0 AND "queuePosition"=0)`);
+        parameters.push(limit);
+        const result = await this.database.query('SELECT * FROM driver_messages' + (conditions.length ? ' WHERE ' + conditions.join(' AND ') : '')
+            + ` ORDER BY "createdAt" DESC,id DESC LIMIT $${parameters.length}`, parameters);
         return result.rows.map(row => ({ ...row, vehicleId: Number(row.vehicleId), zoneId: Number(row.zoneId) })) as unknown as DriverMessageLog[];
     }
     async recordDriverMessage(message: NewDriverMessage) {
