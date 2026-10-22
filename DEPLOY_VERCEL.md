@@ -97,6 +97,11 @@ aceito; não comprova leitura no terminal). A simulação tem registro separado 
 
 As tabelas adicionais são criadas automaticamente, com RLS, na inicialização do backend.
 Confira o detalhe do ciclo da São Conrado e a aba de mensagens (Agendamento #ID).
+No submenu Reservas · São Conrado, “Últimas consultas de reservas” mostra a quantidade
+consultada, elegível e ignorada (anterior ao monitor, menos de 30 minutos, vencida ou já
+registrada). A captura de reservas ocorre antes de GPS, zonas e status, de modo que uma
+falha nesses serviços não bloqueie o aviso; o detalhe da captura é preservado mesmo
+quando a correção de zonas falha no restante do ciclo.
 Este recurso foi validado com respostas simuladas e PostgreSQL embutido; o envio real e a
 publicação na Vercel exigem validação na implantação com as credenciais existentes.
 

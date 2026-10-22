@@ -203,6 +203,16 @@ export class CorrectionService {
                     this.resolvedCompanyIds.set(connection.id, companyId);
                 connection = { ...connection, companyId };
             }
+            if (connection.id === 'sao-conrado' && normalizeZoneName(connection.companyName ?? connection.name) === 'SAO CONRADO' && connection.companyId !== undefined && this.reservationMessagesMode !== 'off' && this.mode !== 'demo') {
+                try {
+                    const result = await notifyReservations({ store: this.repository, gateway, connectionId: connection.id,
+                        companyId: connection.companyId, cycleId, vehicles: await gateway.listVehicles(), mode: this.mode,
+                        messagesMode: this.reservationMessagesMode });
+                    this.notes.push(`${result.detail ? result.detail + '; ' : ''}avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
+                } catch (error) {
+                    this.notes.push(`avisos de reservas não concluídos: ${safeErrorMessage(error)}`);
+                }
+            }
             // As empresas da mesma chave reaproveitam a leitura da frota feita no ciclo.
             let snapshotPromise = options.snapshotCache?.get(gateway);
             if (!snapshotPromise) {
@@ -215,17 +225,6 @@ export class CorrectionService {
             if (connection.companyId !== undefined)
                 snapshot = { ...snapshot, zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
             await this.repository.saveZones(connection.id, snapshot.zones);
-            if (connection.id === 'sao-conrado' && normalizeZoneName(connection.companyName ?? connection.name) === 'SAO CONRADO' && connection.companyId !== undefined) {
-                try {
-                    const result = await notifyReservations({ store: this.repository, gateway, connectionId: connection.id,
-                        companyId: connection.companyId, cycleId, vehicles: snapshot.vehicles, mode: this.mode,
-                        messagesMode: this.reservationMessagesMode });
-                    if (this.reservationMessagesMode !== 'off' && this.mode !== 'demo')
-                        this.notes.push(`avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
-                } catch (error) {
-                    this.notes.push(`avisos de reservas não concluídos: ${safeErrorMessage(error)}`);
-                }
-            }
             if (this.mode === 'live')
                 await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
             const changes = await this.planChanges(connection, snapshot, gateway);
@@ -270,7 +269,7 @@ export class CorrectionService {
         catch (error) {
             // Mensagens próprias, sem credenciais; aparecem no log da Vercel para diagnosticar quedas.
             console.error(`Ciclo ${connection.id} falhou: ${safeErrorMessage(error)}`);
-            await this.repository.finishCycle(cycleId, 'failed', this.inspectedCount, planned, safeErrorMessage(error));
+            await this.repository.finishCycle(cycleId, 'failed', this.inspectedCount, planned, [...this.notes, safeErrorMessage(error)].join('. '));
             return 'failed';
         }
     }

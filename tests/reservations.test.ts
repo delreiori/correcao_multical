@@ -57,7 +57,12 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
         await t.test('inclui 30 minutos exatos e meses de antecedência; exclui outras empresas e menos de 30', async () => {
             bookings = [booking(2, '2026-10-22T10:31:00Z'), booking(3, '2027-03-01T10:00:00Z'),
                 booking(4, '2026-10-22T10:30:59Z'), booking(5, '2026-10-22T15:00:00Z', created, 1)];
-            assert.deepEqual(await notifyReservations(base), { sent: 2, simulated: 0, failed: 0 });
+            const result = await notifyReservations(base);
+            assert.equal(result.sent, 2);
+            assert.equal(result.simulated, 0);
+            assert.equal(result.failed, 0);
+            assert.match(result.detail!, /4 consultadas, 2 elegíveis/);
+            assert.match(result.detail!, /1 com menos de 30 min/);
             assert.deepEqual(sent, [[42, RESERVATION_MESSAGE, true], [42, RESERVATION_MESSAGE, true]]);
             assert.ok((await repository.listDriverMessages()).every(m => m.outcome === 'sent' && m.callsign === '6001'));
         });
@@ -126,6 +131,23 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
             assert.equal(queue.length, 1);
             assert.equal(queue[0].zoneName, 'Praia');
             assert.equal((await repository.listDriverMessages('arcoverde', 1, 'reservations')).length, 0);
+        });
+        await t.test('falha de GPS não impede captar reserva e o diagnóstico permanece no ciclo', async () => {
+            const current = new Date();
+            bookings = [booking(22, new Date(current.getTime() + 3_600_000).toISOString(), current.toISOString())];
+            const failingGps = Object.assign(Object.create(gateway), {
+                listVehicles: async () => vehicles,
+                listGpsPositions: async () => { throw new AutocabRequestError('GPS indisponível'); }
+            });
+            const service = new CorrectionService(repository, { protectedZoneNames: [], outsideZoneName: '' }, 'dry', 'off', null, null, 'live');
+            const before = sent.length;
+            const outcome = await service.runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 2, gateway: failingGps });
+            assert.equal(outcome, 'failed');
+            assert.equal(sent.length, before + 1);
+            const cycle = (await repository.getDashboard('sao-conrado')).cycles.find(c => c.outcome === 'failed' && c.detail?.includes('GPS indisponível'));
+            assert.ok(cycle);
+            assert.match(cycle.detail!, /1 consultadas, 1 elegíveis/);
+            assert.match(cycle.detail!, /1 enviados/);
         });
     } finally { await db.close(); }
 });
