@@ -9,6 +9,20 @@ import { DemoAutocabClient } from '../server/demo.ts';
 import { notifyReservations, RESERVATION_MESSAGE } from '../server/reservation-messages.ts';
 import { CorrectionService } from '../server/correction-service.ts';
 
+test('erro HTTP identifica o endpoint sem expor chave nem query de GPS', async () => {
+    const client = new AutocabClient('https://example.com', 'private-key-for-test', (async () =>
+        new Response(null, { status: 404 })) as typeof fetch);
+    await assert.rejects(client.findZoneByCoordinates(-23.123456, -46.654321, 33), error => {
+        assert.ok(error instanceof AutocabRequestError);
+        assert.equal(error.httpStatus, 404);
+        assert.match(error.message, /HTTP 404 \(GET \/booking\/v1\/zone\)/);
+        assert.ok(!error.message.includes('private-key-for-test'));
+        assert.ok(!error.message.includes('latitude'));
+        assert.ok(!error.message.includes('-23.123456'));
+        return true;
+    });
+});
+
 test('Booking Search v2 usa empresa, paginação e mensagem urgente restrita ao veículo', async () => {
     const requests: { url: string; body: Record<string, unknown> }[] = [];
     const client = new AutocabClient('https://example.com', 'test', (async (url, init) => {
@@ -148,6 +162,18 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
             assert.ok(cycle);
             assert.match(cycle.detail!, /1 consultadas, 1 elegíveis/);
             assert.match(cycle.detail!, /1 enviados/);
+        });
+        await t.test('diagnóstico mostra divergência de horário da reserva sem alterar o fuso silenciosamente', async () => {
+            bookings = [{ id: 23, companyId: 2, bookedAtTime: '2026-10-22T16:13:00Z',
+                pickupDueTimeUtc: '2026-10-22T14:13:00Z', pickupDueTime: '2026-10-22T17:13:00Z' }];
+            const result = await notifyReservations({ ...base, now: new Date('2026-10-22T16:29:00Z') });
+            assert.equal(result.sent, 0);
+            assert.match(result.detail!, /1 vencidas/);
+            assert.match(result.detail!, /reserva #23/);
+            assert.match(result.detail!, /pickupDueTimeUtc 2026-10-22T14:13:00.000Z/);
+            assert.match(result.detail!, /11:13:00 Brasília/);
+            assert.match(result.detail!, /pickupDueTime 2026-10-22T17:13:00.000Z/);
+            assert.match(result.detail!, /14:13:00 Brasília/);
         });
     } finally { await db.close(); }
 });

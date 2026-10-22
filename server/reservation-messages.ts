@@ -19,6 +19,14 @@ function timestamp(value: string): number {
         throw new Error('Horário da reserva inválido ou sem fuso horário');
     return Date.parse(value);
 }
+function showProviderTime(value: string): string {
+    try {
+        const time = timestamp(value);
+        return `${new Date(time).toISOString()} (${new Date(time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} Brasília)`;
+    } catch {
+        return 'inválido ou sem fuso';
+    }
+}
 export async function notifyReservations(options: {
     store: AuditStore; gateway: AutocabGateway; connectionId: string; companyId: number;
     cycleId: string; vehicles: Vehicle[]; mode: OperatingMode;
@@ -69,5 +77,12 @@ export async function notifyReservations(options: {
         result.sent++;
     }
     result.detail = `reservas empresa ${options.companyId}: ${bookings.length} consultadas, ${eligible.length} elegíveis, ${counts.beforeStart} anteriores ao monitor (${startedAt}), ${counts.tooShort} com menos de 30 min, ${counts.past} vencidas, ${counts.futureCreation} com criação futura, ${counts.otherCompany} de outra empresa, ${counts.duplicate} já registradas`;
+    // A small sample of timing fields lets operators investigate timezone discrepancies
+    // without exposing passenger names, addresses, phone numbers or the raw API response.
+    const sample = [...bookings].filter(b => b.companyId === options.companyId)
+        .sort((a, b) => timestamp(b.bookedAtTime) - timestamp(a.bookedAtTime)).slice(0, 5);
+    if (sample.length) result.detail += `; consulta em ${showProviderTime(now.toISOString())}; ` + sample.map(b =>
+        `reserva #${b.id}: criação ${showProviderTime(b.bookedAtTime)}, pickupDueTimeUtc ${showProviderTime(b.pickupDueTimeUtc)}`
+        + (b.pickupDueTime ? `, pickupDueTime ${showProviderTime(b.pickupDueTime)}` : '')).join('; ');
     return result;
 }

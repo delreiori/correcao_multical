@@ -65,6 +65,7 @@ export function DriverMessagesPage({ panelToken, connectionId, kind = 'queue', r
   <p className="note">O aviso é enviado quando a próxima consulta encontra uma nova reserva. Reservas anteriores ao início do monitor não geram aviso. Cada reserva é avisada uma vez ao 6001, inclusive se estiver ocupado.</p>
  </article>}
  {reservations && <article className="reservation-settings"><h2>Últimas consultas de reservas</h2>
+  <p className="note">Os detalhes mostram o caminho da consulta que falhou e os horários recebidos da Autocab em UTC e Brasília. Uma reserva vencida teve seu horário interpretado como anterior à consulta. Nenhuma chave ou dado de passageiro é exibido.</p>
   {cycles.filter(c => c.connectionId === 'sao-conrado').slice(0, 5).map(cycle => <div className="reservation-check" key={cycle.id}><strong>{formatDate(cycle.startedAt)}</strong><p>{cycle.detail || (cycle.outcome === 'running' ? 'Consulta em andamento.' : 'Sem diagnóstico de reservas neste ciclo. Confira se os avisos estão habilitados.')}</p></div>)}
   {!cycles.some(c => c.connectionId === 'sao-conrado') && <p>Aguardando um ciclo da São Conrado. O diagnóstico mostrará quantas reservas foram consultadas, elegíveis ou ignoradas.</p>}
  </article>}
