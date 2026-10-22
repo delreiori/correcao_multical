@@ -1,17 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import type { DriverMessageLog, DriverMessageOutcome, OperatingMode } from '../shared/types.ts';
+import type { DriverMessageLog, DriverMessageOutcome, OperatingMode, CycleLog } from '../shared/types.ts';
 import { fetchDriverMessages } from './api.ts';
 const outcomeLabels: Record<DriverMessageOutcome, string> = { simulated: 'Simulada', sent: 'Enviada', failed: 'Falhou', pending: 'Envio pendente', unknown: 'Resultado incerto' };
 const outcomeClasses: Record<DriverMessageOutcome, string> = { simulated: 'planned', sent: 'confirmed', failed: 'failed', pending: 'planned', unknown: 'failed' };
 function formatDate(date: string) { return new Date(date).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 // Página só de leitura com o histórico dos avisos de fila enviados aos motoristas.
-export function DriverMessagesPage({ panelToken, connectionId, kind = 'queue', reservationMode, operatingMode, refreshVersion = 0 }: {
+export function DriverMessagesPage({ panelToken, connectionId, kind = 'queue', reservationMode, operatingMode, refreshVersion = 0, cycles = [] }: {
     panelToken: string;
     connectionId: string;
     kind?: 'queue' | 'reservations';
     reservationMode?: 'off' | 'dry' | 'live';
     operatingMode?: OperatingMode;
     refreshVersion?: number;
+    cycles?: CycleLog[];
 }) {
     const reservations = kind === 'reservations';
     const reservationState = operatingMode === 'demo' ? 'Demonstração · sem envio real'
@@ -62,6 +63,10 @@ export function DriverMessagesPage({ panelToken, connectionId, kind = 'queue', r
   <dl><div><dt>Empresa</dt><dd>São Conrado</dd></div><div><dt>Destinatário exclusivo</dt><dd>Callsign 6001</dd></div><div><dt>Antecedência na criação</dt><dd>30 minutos ou mais</dd></div><div><dt>Prioridade</dt><dd>Urgente</dd></div></dl>
   <p className="reservation-text">nova corrida agendada checar tela de agendamentos</p>
   <p className="note">O aviso é enviado quando a próxima consulta encontra uma nova reserva. Reservas anteriores ao início do monitor não geram aviso. Cada reserva é avisada uma vez ao 6001, inclusive se estiver ocupado.</p>
+ </article>}
+ {reservations && <article className="reservation-settings"><h2>Últimas consultas de reservas</h2>
+  {cycles.filter(c => c.connectionId === 'sao-conrado').slice(0, 5).map(cycle => <div className="reservation-check" key={cycle.id}><strong>{formatDate(cycle.startedAt)}</strong><p>{cycle.detail || (cycle.outcome === 'running' ? 'Consulta em andamento.' : 'Sem diagnóstico de reservas neste ciclo. Confira se os avisos estão habilitados.')}</p></div>)}
+  {!cycles.some(c => c.connectionId === 'sao-conrado') && <p>Aguardando um ciclo da São Conrado. O diagnóstico mostrará quantas reservas foram consultadas, elegíveis ou ignoradas.</p>}
  </article>}
  {errorMessage && <p className="message" role="alert">{errorMessage} Os dados exibidos podem estar desatualizados.</p>}
  <section className="metrics four"><article><span>Avisos registrados</span><strong>{messages.length}</strong></article><article><span>Enviados</span><strong>{countOf('sent')}</strong></article><article><span>Requerem atenção</span><strong>{countOf('failed') + countOf('unknown') + countOf('pending')}</strong></article><article><span>Só simulados</span><strong>{countOf('simulated')}</strong></article></section>

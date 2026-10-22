@@ -488,10 +488,34 @@ async function notifyReservations(options) {
     throw new Error("Avisos de reserva exigem PostgreSQL e Booking Search v2");
   const recipients = options.vehicles.filter((v) => v.companyId === options.companyId && v.callsign === "6001");
   if (recipients.length !== 1) throw new Error("Callsign 6001 ausente ou amb\xEDguo na S\xE3o Conrado; nenhum aviso enviado");
-  const now = options.now ?? /* @__PURE__ */ new Date();
-  const startedAt = await store.reservationMonitorStart(options.connectionId, options.companyId, now.toISOString());
+  const searchStartedAt = options.now ?? /* @__PURE__ */ new Date();
+  const startedAt = await store.reservationMonitorStart(options.connectionId, options.companyId, searchStartedAt.toISOString());
   const bookings = await gateway.searchReservations(options.companyId);
-  const eligible = bookings.map((b) => ({ b, created: timestamp(b.bookedAtTime), due: timestamp(b.pickupDueTimeUtc) })).filter(({ b, created, due }) => b.companyId === options.companyId && created >= timestamp(startedAt) && created <= now.getTime() && due > now.getTime() && due - created >= 30 * 6e4);
+  const now = options.now ?? /* @__PURE__ */ new Date();
+  const counts = { otherCompany: 0, beforeStart: 0, futureCreation: 0, past: 0, tooShort: 0, duplicate: 0 };
+  const eligible = bookings.map((b) => ({ b, created: timestamp(b.bookedAtTime), due: timestamp(b.pickupDueTimeUtc) })).filter(({ b, created, due }) => {
+    if (b.companyId !== options.companyId) {
+      counts.otherCompany++;
+      return false;
+    }
+    if (created < timestamp(startedAt)) {
+      counts.beforeStart++;
+      return false;
+    }
+    if (created > now.getTime()) {
+      counts.futureCreation++;
+      return false;
+    }
+    if (due <= now.getTime()) {
+      counts.past++;
+      return false;
+    }
+    if (due - created < 30 * 6e4) {
+      counts.tooShort++;
+      return false;
+    }
+    return true;
+  });
   const result = { sent: 0, simulated: 0, failed: 0 };
   for (const { b } of eligible) {
     const simulated = options.messagesMode !== "live";
@@ -504,7 +528,10 @@ async function notifyReservations(options) {
       mode: options.mode,
       simulated
     });
-    if (!id) continue;
+    if (!id) {
+      counts.duplicate++;
+      continue;
+    }
     if (simulated) {
       result.simulated++;
       continue;
@@ -521,6 +548,7 @@ async function notifyReservations(options) {
     await store.finishReservationNotice(id, "sent", status);
     result.sent++;
   }
+  result.detail = `reservas empresa ${options.companyId}: ${bookings.length} consultadas, ${eligible.length} eleg\xEDveis, ${counts.beforeStart} anteriores ao monitor (${startedAt}), ${counts.tooShort} com menos de 30 min, ${counts.past} vencidas, ${counts.futureCreation} com cria\xE7\xE3o futura, ${counts.otherCompany} de outra empresa, ${counts.duplicate} j\xE1 registradas`;
   return result;
 }
 
@@ -951,6 +979,23 @@ var CorrectionService = class {
           this.resolvedCompanyIds.set(connection.id, companyId);
         connection = { ...connection, companyId };
       }
+      if (connection.id === "sao-conrado" && normalizeZoneName(connection.companyName ?? connection.name) === "SAO CONRADO" && connection.companyId !== void 0 && this.reservationMessagesMode !== "off" && this.mode !== "demo") {
+        try {
+          const result = await notifyReservations({
+            store: this.repository,
+            gateway,
+            connectionId: connection.id,
+            companyId: connection.companyId,
+            cycleId,
+            vehicles: await gateway.listVehicles(),
+            mode: this.mode,
+            messagesMode: this.reservationMessagesMode
+          });
+          this.notes.push(`${result.detail ? result.detail + "; " : ""}avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
+        } catch (error) {
+          this.notes.push(`avisos de reservas n\xE3o conclu\xEDdos: ${safeErrorMessage(error)}`);
+        }
+      }
       let snapshotPromise = options.snapshotCache?.get(gateway);
       if (!snapshotPromise) {
         snapshotPromise = this.loadSnapshot(gateway);
@@ -961,24 +1006,6 @@ var CorrectionService = class {
       if (connection.companyId !== void 0)
         snapshot = { ...snapshot, zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
       await this.repository.saveZones(connection.id, snapshot.zones);
-      if (connection.id === "sao-conrado" && normalizeZoneName(connection.companyName ?? connection.name) === "SAO CONRADO" && connection.companyId !== void 0) {
-        try {
-          const result = await notifyReservations({
-            store: this.repository,
-            gateway,
-            connectionId: connection.id,
-            companyId: connection.companyId,
-            cycleId,
-            vehicles: snapshot.vehicles,
-            mode: this.mode,
-            messagesMode: this.reservationMessagesMode
-          });
-          if (this.reservationMessagesMode !== "off" && this.mode !== "demo")
-            this.notes.push(`avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
-        } catch (error) {
-          this.notes.push(`avisos de reservas n\xE3o conclu\xEDdos: ${safeErrorMessage(error)}`);
-        }
-      }
       if (this.mode === "live")
         await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
       const changes = await this.planChanges(connection, snapshot, gateway);
@@ -1016,7 +1043,7 @@ var CorrectionService = class {
       return outcome;
     } catch (error) {
       console.error(`Ciclo ${connection.id} falhou: ${safeErrorMessage(error)}`);
-      await this.repository.finishCycle(cycleId, "failed", this.inspectedCount, planned, safeErrorMessage(error));
+      await this.repository.finishCycle(cycleId, "failed", this.inspectedCount, planned, [...this.notes, safeErrorMessage(error)].join(". "));
       return "failed";
     }
   }
