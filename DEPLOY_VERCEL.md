@@ -78,7 +78,14 @@ Com `AUTOCAB_MODE=dry`, os avisos de reserva em live são reais, mas as correç�
 continuam simuladas. `AUTOCAB_MODE=demo` nunca envia nem consulta reservas.
 
 Cada ciclo consulta `POST /booking/v1/1.2/search` (Search v2, consulta sem alteração)
-para a empresa São Conrado. Usa `bookedAtTime` como criação e `pickupDueTimeUtc` como
+para a empresa São Conrado, informando `from` com o início da consulta e `to` com o
+limite ISO `9999-12-31T23:59:59.999Z` para abranger agendamentos futuros sem depender
+do período padrão da API. Se a busca retornar uma antecedência menor que 30 minutos
+ou horários inválidos, confirma os dados em `GET /booking/v1/booking/{id}` antes de
+decidir. Detalhes arquivados, removidos ou de outra empresa não geram aviso. O painel
+identifica se os horários vieram da busca ou da consulta individual, além do tipo
+Advanced/ASAP quando informado. A autorização da chave precisa incluir essa leitura.
+Usa `bookedAtTime` como criação e `pickupDueTimeUtc` como
 horário agendado: antecedência de **30 minutos ou mais no momento da criação**, inclusive
 reservas para dias/meses depois. O aviso ocorre na primeira consulta que encontrar a nova
 reserva, sujeito ao intervalo do cron e ao ciclo em andamento; não é um webhook instantâneo.
