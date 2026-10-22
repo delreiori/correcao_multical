@@ -69,6 +69,37 @@ Cada passada percorre as três empresas e, em cada uma, todos os veículos daque
 
 ## Ativar alterações
 
+### Aviso de novas reservas da São Conrado (somente 6001)
+
+Defina `RESERVATION_MESSAGES_MODE=live` em Production e publique o código atualizado.
+`off` (padrão) desliga o recurso; `dry` registra simulações. Esse controle é independente
+de `DRIVER_MESSAGES_MODE`, `DRIVER_MESSAGES_ONLY` e dos avisos de fila da Arcoverde.
+Com `AUTOCAB_MODE=dry`, os avisos de reserva em live são reais, mas as correções de zona
+continuam simuladas. `AUTOCAB_MODE=demo` nunca envia nem consulta reservas.
+
+Cada ciclo consulta `POST /booking/v1/1.2/search` (Search v2, consulta sem alteração)
+para a empresa São Conrado. Usa `bookedAtTime` como criação e `pickupDueTimeUtc` como
+horário agendado: antecedência de **30 minutos ou mais no momento da criação**, inclusive
+reservas para dias/meses depois. O aviso ocorre na primeira consulta que encontrar a nova
+reserva, sujeito ao intervalo do cron e ao ciclo em andamento; não é um webhook instantâneo.
+
+A mensagem é `nova corrida agendada checar tela de agendamentos`, enviada com `urgent: true`
+exclusivamente ao veículo de callsign **6001 da São Conrado**, inclusive se ocupado.
+Nunca usa 6001 como ID do veículo. Callsign ausente/duplicado bloqueia o envio.
+A chave Autocab precisa autorizar Search v2 na Booking API e mensagens na Vehicle API.
+
+Na primeira consulta habilitada, o monitor grava no PostgreSQL/Supabase o início da
+observação: reservas criadas antes disso não geram aviso. Reiniciar ou republicar preserva
+esse início e a deduplicação. Cada reserva tem uma intenção persistida antes do envio;
+falhas/timeouts não são repetidos automaticamente, pois a Autocab pode ter recebido a
+mensagem. O histórico mostra Envio pendente, Resultado incerto, Falhou ou Enviada (HTTP
+aceito; não comprova leitura no terminal). A simulação tem registro separado do envio real.
+
+As tabelas adicionais são criadas automaticamente, com RLS, na inicialização do backend.
+Confira o detalhe do ciclo da São Conrado e a aba de mensagens (Agendamento #ID).
+Este recurso foi validado com respostas simuladas e PostgreSQL embutido; o envio real e a
+publicação na Vercel exigem validação na implantação com as credenciais existentes.
+
 Depois de conferir os dados e planos em dry, configure `AUTOCAB_MODE=live` e faça novo deploy. O endpoint de plot passará a receber alterações reais. O POST real não foi executado durante o desenvolvimento.
 
 ## Desenvolvimento local

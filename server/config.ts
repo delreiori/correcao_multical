@@ -24,6 +24,7 @@ export interface AppConfig {
     // Tempo máximo de cada requisição à Autocab.
     autocabTimeoutMs: number;
     driverMessagesMode: DriverMessagesMode;
+    reservationMessagesMode?: DriverMessagesMode;
     driverMessagePath: string;
     driverMessageFields: Record<string, unknown>;
     // Callsigns ou IDs que recebem os avisos; null = todos os motoristas livres da zona.
@@ -120,6 +121,9 @@ function readDriverMessagePath() {
     return path;
 }
 export function readConfiguration(): AppConfig {
+    const reservationMessagesMode = process.env.RESERVATION_MESSAGES_MODE || 'off';
+    if (!['off', 'dry', 'live'].includes(reservationMessagesMode))
+        throw new Error('RESERVATION_MESSAGES_MODE deve ser off, dry ou live');
     const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? 'dry' : 'demo');
     if (!['demo', 'dry', 'live'].includes(mode))
         throw new Error('AUTOCAB_MODE deve ser demo, dry ou live');
@@ -133,5 +137,6 @@ export function readConfiguration(): AppConfig {
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
         autocabTimeoutMs: readPositiveInteger(process.env.AUTOCAB_TIMEOUT_MS, 10000),
+        reservationMessagesMode: reservationMessagesMode as DriverMessagesMode,
         driverMessagesMode: readDriverMessagesMode(), driverMessagePath: readDriverMessagePath(), driverMessageFields: readDriverMessageFields(), driverMessageRecipients: readDriverMessageRecipients(), driverMessagesTop: process.env.DRIVER_MESSAGES_TOP?.trim() ? readPositiveInteger(process.env.DRIVER_MESSAGES_TOP, 1) : null, connections: readConnections() };
 }

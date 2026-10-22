@@ -6,6 +6,7 @@ import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, VehicleStatus } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
 import { notifyQueueChanges } from './driver-messages.ts';
+import { notifyReservations } from './reservation-messages.ts';
 export interface CorrectionConnection {
     id: string;
     name: string;
@@ -45,9 +46,10 @@ export class CorrectionService {
     private notes: string[] = [];
     private resolvedCompanyIds = new Map<string, number>();
     private driverMessagesMode: DriverMessagesMode;
+    private reservationMessagesMode: DriverMessagesMode;
     private driverMessageRecipients: string[] | null;
     private driverMessagesTop: number | null;
-    constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off', driverMessageRecipients: string[] | null = null, driverMessagesTop: number | null = null) { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; this.driverMessageRecipients = driverMessageRecipients; this.driverMessagesTop = driverMessagesTop; }
+    constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off', driverMessageRecipients: string[] | null = null, driverMessagesTop: number | null = null, reservationMessagesMode: DriverMessagesMode = 'off') { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; this.driverMessageRecipients = driverMessageRecipients; this.driverMessagesTop = driverMessagesTop; this.reservationMessagesMode = reservationMessagesMode; }
     private async loadSnapshot(gateway: AutocabGateway): Promise<FleetSnapshot> {
         const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
         if (new Set(zones.map(zone => zone.id)).size !== zones.length)
@@ -213,6 +215,17 @@ export class CorrectionService {
             if (connection.companyId !== undefined)
                 snapshot = { ...snapshot, zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
             await this.repository.saveZones(connection.id, snapshot.zones);
+            if (connection.id === 'sao-conrado' && normalizeZoneName(connection.companyName ?? connection.name) === 'SAO CONRADO' && connection.companyId !== undefined) {
+                try {
+                    const result = await notifyReservations({ store: this.repository, gateway, connectionId: connection.id,
+                        companyId: connection.companyId, cycleId, vehicles: snapshot.vehicles, mode: this.mode,
+                        messagesMode: this.reservationMessagesMode });
+                    if (this.reservationMessagesMode !== 'off' && this.mode !== 'demo')
+                        this.notes.push(`avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
+                } catch (error) {
+                    this.notes.push(`avisos de reservas não concluídos: ${safeErrorMessage(error)}`);
+                }
+            }
             if (this.mode === 'live')
                 await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
             const changes = await this.planChanges(connection, snapshot, gateway);

@@ -66,7 +66,7 @@ export interface CycleLog {
     planned: number;
     detail: string | null;
 }
-export type DriverMessageOutcome = 'simulated' | 'sent' | 'failed';
+export type DriverMessageOutcome = 'simulated' | 'sent' | 'failed' | 'pending' | 'unknown';
 export interface DriverMessageLog {
     id: string;
     connectionId: string;
@@ -101,6 +101,7 @@ export interface ConnectionStatus {
     companyName?: string;
 }
 export interface SystemStatus {
+    reservationMessagesMode?: 'off' | 'dry' | 'live';
     execution?: "serverless";
     mode: OperatingMode;
     running: boolean;

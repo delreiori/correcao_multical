@@ -23,8 +23,8 @@ function ZoneList({ zones }: {
 }) {
     return <article><h2>Zonas consultadas <small>{zones.length} zonas</small></h2><div className="zones">{zones.map(zone => <div className="vehicle" key={zone.connectionId + ':' + zone.id}><div><strong>{zone.name}</strong><br /><small>{zone.connectionId} · empresa {zone.companyId ?? 'não informada'} · ID {zone.id}</small></div><span title={formatDate(zone.updatedAt)}>Consultada</span></div>)}</div>{!zones.length && <p>Nenhuma zona carregada. Consulte o estado da conexão nos ciclos.</p>}</article>;
 }
-type Page = 'movimentacoes' | 'avisos';
-function readPage(): Page { return location.hash === '#/avisos' ? 'avisos' : 'movimentacoes'; }
+type Page = 'movimentacoes' | 'avisos' | 'reservas';
+function readPage(): Page { return location.hash === '#/avisos/reservas' ? 'reservas' : location.hash === '#/avisos' ? 'avisos' : 'movimentacoes'; }
 function Dashboard() {
     const [page, setPage] = useState<Page>(readPage);
     useEffect(() => {
@@ -35,6 +35,7 @@ function Dashboard() {
     const [panelToken, setPanelToken] = useState('');
     const [tokenInput, setTokenInput] = useState('');
     const [connectionId, setConnectionId] = useState('');
+    const activeConnectionId = page === 'reservas' ? 'sao-conrado' : connectionId;
     const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
     const [dashboard, setDashboard] = useState<DashboardData>({ changes: [], cycles: [], zones: [], totalChanges: 0 });
     const [errorMessage, setErrorMessage] = useState('');
@@ -45,7 +46,7 @@ function Dashboard() {
         let timer: ReturnType<typeof setTimeout>;
         async function updateDashboard() {
             try {
-                const [statusResponse, dashboardResponse] = await Promise.all([fetchSystemStatus(panelToken), fetchDashboard(panelToken, connectionId)]);
+                const [statusResponse, dashboardResponse] = await Promise.all([fetchSystemStatus(panelToken), fetchDashboard(panelToken, activeConnectionId)]);
                 if (!cancelled) {
                     setSystemStatus(statusResponse);
                     setDashboard(dashboardResponse);
@@ -64,16 +65,17 @@ function Dashboard() {
         }
         void updateDashboard();
         return () => { cancelled = true; clearTimeout(timer); };
-    }, [panelToken, connectionId, refreshVersion]);
+    }, [panelToken, activeConnectionId, refreshVersion]);
     const confirmedCount = dashboard.changes.filter(change => change.outcome === 'confirmed').length;
     const attentionCount = dashboard.changes.filter(change => ['unknown', 'failed', 'unconfirmed'].includes(change.outcome)).length;
-    return <main><header><div><span className="eyebrow">MULTICALL · CONTROLE DE ZONAS</span><h1>{page === 'avisos' ? 'Avisos aos motoristas' : 'Movimentações da frota'}</h1><p>{page === 'avisos' ? 'Mensagens de fila enviadas pela central aos motoristas.' : 'Histórico automático de zonas e posições na fila.'}</p></div><span className="mode">{systemStatus ? modeLabels[systemStatus.mode] : 'Conectando…'}</span></header>
- <nav className="tabs"><a href="#/" className={page === 'movimentacoes' ? 'active' : ''}>Movimentações</a><a href="#/avisos" className={page === 'avisos' ? 'active' : ''}>Avisos aos motoristas</a></nav>
+    return <main><header><div><span className="eyebrow">MULTICALL · CONTROLE DE ZONAS</span><h1>{page === 'reservas' ? 'Reservas · São Conrado' : page === 'avisos' ? 'Avisos de fila' : 'Movimentações da frota'}</h1><p>{page === 'reservas' ? 'Avisos urgentes de novas corridas agendadas para o motorista 6001.' : page === 'avisos' ? 'Mensagens de fila enviadas pela central aos motoristas.' : 'Histórico automático de zonas e posições na fila.'}</p></div><span className="mode">{systemStatus ? modeLabels[systemStatus.mode] : 'Conectando…'}</span></header>
+ <nav className="tabs" aria-label="Seções do painel"><a href="#/" className={page === 'movimentacoes' ? 'active' : ''}>Movimentações</a><a href="#/avisos" className={page !== 'movimentacoes' ? 'active' : ''}>Avisos aos motoristas</a></nav>
+ {page !== 'movimentacoes' && <nav className="subtabs" aria-label="Tipos de aviso"><a href="#/avisos" aria-current={page === 'avisos' ? 'page' : undefined}>Fila · Arcoverde</a><a href="#/avisos/reservas" aria-current={page === 'reservas' ? 'page' : undefined}>Reservas · São Conrado</a></nav>}
  {systemStatus?.mode === 'demo' && <aside>Veículos e zonas fictícios. O modo demonstração não se conecta à Autocab.</aside>}
  {systemStatus?.mode === 'dry' && <aside>Consultando dados reais. As alterações são apenas simuladas; nenhum veículo é movido.</aside>}
- <section className="access"><form onSubmit={event => { event.preventDefault(); setPanelToken(tokenInput); }}><label>Token do painel<input type="password" value={tokenInput} onChange={event => setTokenInput(event.target.value)} autoComplete="off" placeholder="Se exigido pelo servidor"/></label><button>Conectar</button></form><label>Empresa / conexão<select value={connectionId} onChange={event => setConnectionId(event.target.value)}><option value="">Todas as conexões</option>{systemStatus?.connections.map(connection => <option key={connection.id} value={connection.id}>{connection.name}{connection.configured ? '' : ' · chave ausente'}</option>)}</select></label><button onClick={() => setRefreshVersion(version => version + 1)}>Atualizar</button></section>
+ <section className="access"><form onSubmit={event => { event.preventDefault(); setPanelToken(tokenInput); }}><label>Token do painel<input type="password" value={tokenInput} onChange={event => setTokenInput(event.target.value)} autoComplete="off" placeholder="Se exigido pelo servidor"/></label><button>Conectar</button></form><label>Empresa / conexão<select value={activeConnectionId} disabled={page === 'reservas'} onChange={event => setConnectionId(event.target.value)}><option value="">Todas as conexões</option>{page === 'reservas' && !systemStatus?.connections.some(c => c.id === 'sao-conrado') && <option value="sao-conrado">São Conrado</option>}{systemStatus?.connections.map(connection => <option key={connection.id} value={connection.id}>{connection.name}{connection.configured ? '' : ' · chave ausente'}</option>)}</select></label><button onClick={() => setRefreshVersion(version => version + 1)}>Atualizar</button></section>
  {errorMessage && <p className="message" role="alert">{errorMessage} Os dados exibidos podem estar desatualizados.</p>}
- {page === 'avisos' ? <DriverMessagesPage panelToken={panelToken} connectionId={connectionId}/> : <><section className="metrics"><article><span>Histórico armazenado</span><strong>{dashboard.totalChanges}</strong></article><article><span>Confirmadas nos últimos 500</span><strong>{confirmedCount}</strong></article><article><span>Requerem atenção nos últimos 500</span><strong>{attentionCount}</strong></article></section>
+ {page !== 'movimentacoes' ? <DriverMessagesPage key={page + ':' + activeConnectionId} panelToken={panelToken} connectionId={activeConnectionId} kind={page === 'reservas' ? 'reservations' : 'queue'} reservationMode={systemStatus?.reservationMessagesMode} operatingMode={systemStatus?.mode} refreshVersion={refreshVersion}/> : <><section className="metrics"><article><span>Histórico armazenado</span><strong>{dashboard.totalChanges}</strong></article><article><span>Confirmadas nos últimos 500</span><strong>{confirmedCount}</strong></article><article><span>Requerem atenção nos últimos 500</span><strong>{attentionCount}</strong></article></section>
  <p className="note" role="status">{systemStatus?.running ? 'Ciclo em execução' : systemStatus?.execution === 'serverless' ? 'Ciclos por agendamento da Vercel' : systemStatus?.autoStart ? 'Rotina automática ativa' : 'Rotina automática desativada'} · {systemStatus && systemStatus.execution !== 'serverless' ? `intervalo após cada ciclo: ${systemStatus.intervalMs / 1000}s` : ''}{lastUpdated && ` · painel atualizado ${formatDate(lastUpdated)}`}</p>
  <ChangeHistory changes={dashboard.changes}/><section className="grid lower"><CycleHistory cycles={dashboard.cycles}/><ZoneList zones={dashboard.zones}/></section></>}</main>;
 }

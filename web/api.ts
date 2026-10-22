@@ -28,7 +28,10 @@ export function fetchDashboard(panelToken: string, connectionId: string) {
     const query = connectionId ? '?' + new URLSearchParams({ connectionId }) : '';
     return requestJson<DashboardData>('dashboard' + query, panelToken);
 }
-export function fetchDriverMessages(panelToken: string, connectionId: string) {
-    const query = connectionId ? '?' + new URLSearchParams({ connectionId }) : '';
+export function fetchDriverMessages(panelToken: string, connectionId: string, kind?: 'queue' | 'reservations') {
+    const parameters = new URLSearchParams();
+    if (connectionId) parameters.set('connectionId', connectionId);
+    if (kind) parameters.set('kind', kind);
+    const query = parameters.size ? '?' + parameters : '';
     return requestJson<{ messages: DriverMessageLog[] }>('messages' + query, panelToken);
 }

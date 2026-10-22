@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { OperatingMode, PlannedChange, ChangeOutcome, ChangeLog, CycleLog, Zone, SavedZone, DashboardData, DriverMessageLog } from '../shared/types.ts';
-import type { NewDriverMessage } from './audit-store.ts';
+import type { NewDriverMessage, MessageKind } from './audit-store.ts';
 export class AuditRepository {
     private database: DatabaseSync;
     constructor(databasePath: string) {
@@ -74,9 +74,13 @@ export class AuditRepository {
     saveZoneQueueSignature(connectionId: string, zoneId: number, signature: string) {
         this.database.prepare('INSERT INTO zone_queue_signatures VALUES(?,?,?,?) ON CONFLICT(connectionId,zoneId) DO UPDATE SET signature=excluded.signature,updatedAt=excluded.updatedAt').run(connectionId, zoneId, signature, new Date().toISOString());
     }
-    listDriverMessages(connectionId: string | null = null, limit = 1000) {
-        const filter = connectionId ? ' WHERE connectionId=?' : '';
-        const parameters = connectionId ? [connectionId, limit] : [limit];
+    listDriverMessages(connectionId: string | null = null, limit = 1000, kind?: MessageKind) {
+        const conditions = [];
+        const parameters: (string | number)[] = [];
+        if (connectionId) { conditions.push('connectionId=?'); parameters.push(connectionId); }
+        if (kind) conditions.push(`${kind === 'queue' ? 'NOT ' : ''}(zoneId=0 AND queuePosition=0)`);
+        parameters.push(limit);
+        const filter = conditions.length ? ' WHERE ' + conditions.join(' AND ') : '';
         return this.database.prepare('SELECT * FROM driver_messages' + filter + ' ORDER BY createdAt DESC,rowid DESC LIMIT ?').all(...parameters) as unknown as DriverMessageLog[];
     }
     recordDriverMessage(message: NewDriverMessage) {
