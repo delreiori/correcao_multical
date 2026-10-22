@@ -207,8 +207,8 @@ export class CorrectionService {
                 try {
                     const result = await notifyReservations({ store: this.repository, gateway, connectionId: connection.id,
                         companyId: connection.companyId, cycleId, vehicles: await gateway.listVehicles(), mode: this.mode,
-                        messagesMode: this.reservationMessagesMode });
-                    this.notes.push(`${result.detail ? result.detail + '; ' : ''}avisos de reservas ao 6001: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
+                        messagesMode: this.reservationMessagesMode, deadline: this.deadline - 15000 });
+                    this.notes.push(`${result.detail ? result.detail + '; ' : ''}avisos de reservas à São Conrado: ${result.sent} enviados, ${result.simulated} simulados, ${result.failed} falhas/incertos`);
                 } catch (error) {
                     this.notes.push(`avisos de reservas não concluídos: ${safeErrorMessage(error)}`);
                 }

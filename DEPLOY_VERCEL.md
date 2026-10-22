@@ -69,7 +69,7 @@ Cada passada percorre as três empresas e, em cada uma, todos os veículos daque
 
 ## Ativar alterações
 
-### Aviso de novas reservas da São Conrado (somente 6001)
+### Aviso de novas reservas para todos os motoristas da São Conrado
 
 Defina `RESERVATION_MESSAGES_MODE=live` em Production e publique o código atualizado.
 `off` (padrão) desliga o recurso; `dry` registra simulações. Esse controle é independente
@@ -91,8 +91,11 @@ reservas para dias/meses depois. O aviso ocorre na primeira consulta que encontr
 reserva, sujeito ao intervalo do cron e ao ciclo em andamento; não é um webhook instantâneo.
 
 A mensagem é `nova corrida agendada checar tela de agendamentos`, enviada com `urgent: true`
-exclusivamente ao veículo de callsign **6001 da São Conrado**, inclusive se ocupado.
-Nunca usa 6001 como ID do veículo. Callsign ausente/duplicado bloqueia o envio.
+a **todos os veículos da São Conrado**, inclusive ocupados, em lotes de até quatro envios simultâneos.
+Cada destinatário tem resultado e deduplicação próprios; falha em um envio não impede os demais.
+Os registros anteriores do 6001 continuam impedindo repetição para ele. Outros motoristas podem
+receber uma reserva futura ainda elegível que antes foi avisada somente ao 6001.
+Os motoristas de outras empresas ficam fora desse aviso. Cadastro com IDs/callsigns ambíguos bloqueia o envio.
 A chave Autocab precisa autorizar Search v2 na Booking API e mensagens na Vehicle API.
 
 Na primeira consulta habilitada, o monitor grava no PostgreSQL/Supabase o início da

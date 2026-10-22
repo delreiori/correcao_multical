@@ -60,9 +60,9 @@ export function DriverMessagesPage({ panelToken, connectionId, kind = 'queue', r
     return <>
  {reservations && <article className="reservation-settings" aria-label="Regras dos avisos de reservas">
   <div className="reservation-heading"><h2>Nova corrida agendada</h2><span className={'badge ' + (reservationMode === 'live' && operatingMode !== 'demo' ? 'confirmed' : 'planned')}>{reservationState}</span></div>
-  <dl><div><dt>Empresa</dt><dd>São Conrado</dd></div><div><dt>Destinatário exclusivo</dt><dd>Callsign 6001</dd></div><div><dt>Antecedência na criação</dt><dd>30 minutos ou mais</dd></div><div><dt>Prioridade</dt><dd>Urgente</dd></div></dl>
+  <dl><div><dt>Empresa</dt><dd>São Conrado</dd></div><div><dt>Destinatários</dt><dd>Todos da São Conrado</dd></div><div><dt>Antecedência na criação</dt><dd>30 minutos ou mais</dd></div><div><dt>Prioridade</dt><dd>Urgente</dd></div></dl>
   <p className="reservation-text">nova corrida agendada checar tela de agendamentos</p>
-  <p className="note">O aviso é enviado quando a próxima consulta encontra uma nova reserva. Reservas anteriores ao início do monitor não geram aviso. Cada reserva é avisada uma vez ao 6001, inclusive se estiver ocupado.</p>
+  <p className="note">O aviso é enviado quando a próxima consulta encontra uma nova reserva. Reservas anteriores ao início do monitor não geram aviso. Cada motorista da São Conrado recebe um aviso por reserva, inclusive se estiver ocupado.</p>
  </article>}
  {reservations && <article className="reservation-settings"><h2>Últimas consultas de reservas</h2>
   <p className="note">Os detalhes mostram o caminho da consulta que falhou e os horários recebidos da Autocab em UTC e Brasília. Uma reserva vencida teve seu horário interpretado como anterior à consulta. Nenhuma chave ou dado de passageiro é exibido.</p>

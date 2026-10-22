@@ -75,36 +75,39 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
             bookings = [booking(2, '2026-10-22T10:31:00Z'), booking(3, '2027-03-01T10:00:00Z'),
                 booking(4, '2026-10-22T10:30:59Z'), booking(5, '2026-10-22T15:00:00Z', created, 1)];
             const result = await notifyReservations(base);
-            assert.equal(result.sent, 2);
+            assert.equal(result.sent, 4);
             assert.equal(result.simulated, 0);
             assert.equal(result.failed, 0);
             assert.match(result.detail!, /4 consultadas, 2 elegíveis/);
             assert.match(result.detail!, /1 com menos de 30 min/);
-            assert.deepEqual(sent, [[42, RESERVATION_MESSAGE, true], [42, RESERVATION_MESSAGE, true]]);
-            assert.ok((await repository.listDriverMessages()).every(m => m.outcome === 'sent' && m.callsign === '6001'));
+            assert.deepEqual(sent.map(v => v[0]).sort((a, b) => Number(a) - Number(b)), [42, 42, 6001, 6001]);
+            assert.ok(sent.every(v => v[1] === RESERVATION_MESSAGE && v[2] === true));
+            assert.ok((await repository.listDriverMessages()).every(m => m.outcome === 'sent' && ['6001', '6002'].includes(m.callsign)));
         });
         await t.test('novo processo e chamadas concorrentes não repetem reservas', async () => {
             const restored = new PostgresAuditRepository(sql);
             await notifyReservations({ ...base, store: restored });
-            assert.equal(sent.length, 2);
+            assert.equal(sent.length, 4);
             bookings = [booking(20, '2026-10-22T15:00:00Z')];
             await Promise.all([notifyReservations({ ...base, store: restored }), notifyReservations(base)]);
-            assert.equal(sent.length, 3);
+            assert.equal(sent.length, 6);
         });
         await t.test('timeout registra incerto e não repete', async () => {
             bookings = [booking(6, '2026-10-22T15:00:00Z')];
             let attempts = 0;
-            const failing = Object.assign(Object.create(gateway), { sendDriverMessage: async () => { attempts++; throw new AutocabRequestError('timeout'); } });
-            assert.equal((await notifyReservations({ ...base, gateway: failing })).failed, 1);
-            await notifyReservations({ ...base, gateway: failing }); assert.equal(attempts, 1);
-            assert.equal((await repository.listDriverMessages()).find(m => m.zoneName === 'Agendamento #6')?.outcome, 'unknown');
+            const failing = Object.assign(Object.create(gateway), { sendDriverMessage: async (vehicleId: number) => { attempts++; if (vehicleId === 42) throw new AutocabRequestError('timeout'); return 204; } });
+            const result = await notifyReservations({ ...base, gateway: failing });
+            assert.equal(result.failed, 1);
+            assert.equal(result.sent, 1);
+            await notifyReservations({ ...base, gateway: failing }); assert.equal(attempts, 2);
+            assert.equal((await repository.listDriverMessages()).find(m => m.zoneName === 'Agendamento #6' && m.callsign === '6001')?.outcome, 'unknown');
         });
         await t.test('dry simula sem impedir posterior envio live; demo/off não consultam', async () => {
             const before = sent.length;
             bookings = [booking(7, '2026-10-22T15:00:00Z')];
-            assert.equal((await notifyReservations({ ...base, messagesMode: 'dry' })).simulated, 1);
+            assert.equal((await notifyReservations({ ...base, messagesMode: 'dry' })).simulated, 2);
             assert.equal(sent.length, before);
-            assert.equal((await notifyReservations(base)).sent, 1);
+            assert.equal((await notifyReservations(base)).sent, 2);
             const disabled = Object.assign(Object.create(gateway), { searchReservations: async () => { throw new Error('não deveria consultar'); } });
             await notifyReservations({ ...base, gateway: disabled, mode: 'demo' });
             await notifyReservations({ ...base, gateway: disabled, messagesMode: 'off' });
@@ -112,14 +115,15 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
         await t.test('intenção pendente sobrevive a encerramento e recuperação sem novo envio', async () => {
             bookings = [booking(21, '2026-10-22T15:00:00Z')];
             const id = await repository.claimReservationNotice({ connectionId: base.connectionId, companyId: 2,
-                bookingId: 21, vehicleId: 42, cycleId: 'interrupted', mode: 'dry', simulated: false });
+                bookingId: 21, vehicleId: 42, callsign: '6001', cycleId: 'interrupted', mode: 'dry', simulated: false });
             assert.ok(id);
             await repository.recoverInterruptedCycles();
+            assert.equal((await notifyReservations(base)).sent, 1);
             assert.equal((await notifyReservations(base)).sent, 0);
             assert.equal((await repository.listDriverMessages()).find(m => m.id === id)?.outcome, 'unknown');
         });
-        await t.test('callsign ausente ou duplicado e horários sem fuso bloqueiam envio', async () => {
-            await assert.rejects(notifyReservations({ ...base, vehicles: vehicles.filter(v => v.id !== 42) }), /6001/);
+        await t.test('frota ausente ou ambígua e horários sem fuso bloqueiam envio', async () => {
+            await assert.rejects(notifyReservations({ ...base, vehicles: vehicles.filter(v => v.companyId !== 2) }), /Nenhum veículo/);
             await assert.rejects(notifyReservations({ ...base, vehicles: [...vehicles, { id: 99, companyId: 2, callsign: '6001' }] }), /ambíguo/);
             bookings = [booking(8, '2026-10-22T15:00:00')];
             await assert.rejects(notifyReservations(base), /fuso/);
@@ -136,7 +140,7 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
             await service.runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, gateway: integrationGateway });
             assert.equal(sent.length, before);
             await service.runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 2, gateway: integrationGateway });
-            assert.equal(sent.length, before + 1);
+            assert.equal(sent.length, before + 2);
         });
         await t.test('histórico filtra reservas antes do limite, separado dos avisos de fila', async () => {
             const { id, createdAt, ...message } = (await repository.listDriverMessages())[0];
@@ -160,11 +164,11 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
             const before = sent.length;
             const outcome = await service.runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 2, gateway: failingGps });
             assert.equal(outcome, 'failed');
-            assert.equal(sent.length, before + 1);
+            assert.equal(sent.length, before + 2);
             const cycle = (await repository.getDashboard('sao-conrado')).cycles.find(c => c.outcome === 'failed' && c.detail?.includes('GPS indisponível'));
             assert.ok(cycle);
             assert.match(cycle.detail!, /1 consultadas, 1 elegíveis/);
-            assert.match(cycle.detail!, /1 enviados/);
+            assert.match(cycle.detail!, /2 enviados/);
         });
         await t.test('diagnóstico mostra divergência de horário da reserva sem alterar o fuso silenciosamente', async () => {
             bookings = [{ id: 23, companyId: 2, bookedAtTime: '2026-10-22T16:13:00Z',
@@ -180,7 +184,7 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
         });
         await t.test('reserva com uma hora de antecedência é recuperada pelo detalhe quando busca mostra horário da criação', async () => {
             const requests: string[] = [];
-            let sentBody: Record<string, unknown> | undefined;
+            const sentBodies: Record<string, unknown>[] = [];
             const client = new AutocabClient('https://example.com', 'test', (async (url, init) => {
                 const path = new URL(String(url)).pathname;
                 requests.push(`${init?.method ?? 'GET'} ${path}`);
@@ -194,17 +198,16 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
                     return Response.json({ companyId: 2, bookingType: 'Advanced', bookedAtTime: created, pickupDueTimeUtc: '2026-10-22T11:01:00Z' });
                 }
                 if (path === '/vehicle/v1/vehicles/message') {
-                    sentBody = JSON.parse(String(init?.body));
+                    sentBodies.push(JSON.parse(String(init?.body)));
                     return new Response(null, { status: 204 });
                 }
                 throw new Error('Unexpected request');
             }) as typeof fetch);
             const result = await notifyReservations({ ...base, gateway: client });
-            assert.equal(result.sent, 1);
+            assert.equal(result.sent, 2);
             assert.match(result.detail!, /tipo Advanced \(horários da consulta individual\)/);
-            assert.deepEqual(sentBody?.vehicles, [42]);
-            assert.equal(sentBody?.urgent, true);
-            assert.equal(sentBody?.text, RESERVATION_MESSAGE);
+            assert.deepEqual(sentBodies.flatMap(b => b.vehicles as number[]).sort((a, b) => a - b), [42, 6001]);
+            assert.ok(sentBodies.every(b => b.urgent === true && b.text === RESERVATION_MESSAGE));
             assert.ok(requests.includes('GET /booking/v1/booking/501'));
             assert.equal((await notifyReservations({ ...base, gateway: client })).sent, 0);
         });
@@ -217,6 +220,30 @@ test('reservas São Conrado persistem ativação, deduplicação e resultados no
                 }) as typeof fetch);
                 assert.equal((await notifyReservations({ ...base, gateway: client })).sent, 0);
             }
+        });
+        await t.test('toda a frota recebe uma vez, em lotes de até quatro e sem outras empresas', async () => {
+            bookings = [booking(503, '2026-10-22T15:00:00Z')];
+            const fleet = Array.from({ length: 9 }, (_, index) => ({ id: 100 + index, companyId: 2, callsign: String(7000 + index) }));
+            let active = 0, maximum = 0;
+            const deliveries: number[] = [];
+            const broadcastGateway = Object.assign(Object.create(gateway), { sendDriverMessage: async (vehicleId: number) => {
+                active++; maximum = Math.max(maximum, active);
+                await new Promise(resolve => setTimeout(resolve, 5));
+                deliveries.push(vehicleId); active--; return 204;
+            } });
+            const options = { ...base, gateway: broadcastGateway, vehicles: [...fleet, fleet[0], { id: 999, callsign: '9999', companyId: 1 }] };
+            assert.equal((await notifyReservations(options)).sent, 9);
+            assert.ok(maximum <= 4);
+            assert.deepEqual(deliveries.sort((a, b) => a - b), fleet.map(v => v.id));
+            assert.equal((await notifyReservations(options)).sent, 0);
+        });
+        await t.test('destinatários não iniciados antes do prazo são retomados no próximo ciclo', async () => {
+            bookings = [booking(504, '2026-10-22T15:00:00Z')];
+            const result = await notifyReservations({ ...base, deadline: 0 });
+            assert.equal(result.sent, 0);
+            assert.match(result.detail!, /retomados no próximo ciclo/);
+            assert.equal((await notifyReservations(base)).sent, 2);
+            assert.equal((await notifyReservations(base)).sent, 0);
         });
     } finally { await db.close(); }
 });
