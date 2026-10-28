@@ -119,4 +119,7 @@ export class PostgresAuditRepository implements AuditStore {
         await this.database.query('DELETE FROM driver_messages WHERE "createdAt"<$1', [daysAgo(30)]);
         await this.database.query("DELETE FROM plot_changes WHERE \"createdAt\"<$1 AND NOT (mode='live' AND outcome IN ('pending','unknown','unconfirmed'))", [daysAgo(90)]);
     }
+    async discardCycle(cycleId: string) {
+        await this.database.query('DELETE FROM correction_cycles WHERE id=$1', [cycleId]);
+    }
 }

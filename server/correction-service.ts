@@ -34,7 +34,11 @@ export async function resolveCompanyId(connection: CorrectionConnection, gateway
     return matchingCompanies[0].id;
 }
 // Consultas simultâneas de zona por GPS; mantém a carga na Autocab limitada.
-const GPS_LOOKUP_CONCURRENCY = 8;
+const GPS_LOOKUP_CONCURRENCY = 16;
+// Zona por GPS reaproveitada enquanto o carro não se mexe (~11 m, 4 casas decimais) por até 2 minutos.
+const ZONE_LOOKUP_TTL_MS = 120_000;
+// Zonas e veículos quase não mudam: a passada rápida reaproveita a última leitura por até 1 minuto.
+const FLEET_CACHE_TTL_MS = 60_000;
 function safeErrorMessage(error: unknown) { return error instanceof Error ? error.message : 'Falha não identificada na correção'; }
 export class CorrectionService {
     private repository: AuditStore;
@@ -50,6 +54,29 @@ export class CorrectionService {
     private driverMessageRecipients: string[] | null;
     private driverMessagesTop: number | null;
     constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off', driverMessageRecipients: string[] | null = null, driverMessagesTop: number | null = null, reservationMessagesMode: DriverMessagesMode = 'off') { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; this.driverMessageRecipients = driverMessageRecipients; this.driverMessagesTop = driverMessagesTop; this.reservationMessagesMode = reservationMessagesMode; }
+    private zoneLookups = new Map<string, { zoneId: number | null; at: number }>();
+    // Só consulta a Autocab quando o carro se moveu desde a última consulta; parado no ponto, reaproveita.
+    private async lookupZone(gateway: AutocabGateway, vehicleId: number, latitude: number, longitude: number, companyId?: number) {
+        const key = `${companyId ?? ''}:${vehicleId}:${latitude.toFixed(4)}:${longitude.toFixed(4)}`;
+        const cached = this.zoneLookups.get(key);
+        if (cached && Date.now() - cached.at < ZONE_LOOKUP_TTL_MS)
+            return cached.zoneId;
+        const zoneId = await gateway.findZoneByCoordinates(latitude, longitude, companyId);
+        if (this.zoneLookups.size > 20_000)
+            this.zoneLookups.clear();
+        this.zoneLookups.set(key, { zoneId, at: Date.now() });
+        return zoneId;
+    }
+    // Passada rápida: zonas e veículos da última leitura (se recentes) e só status e GPS novos.
+    private async loadFastSnapshot(connectionId: string, gateway: AutocabGateway): Promise<FleetSnapshot | null> {
+        const fleet = this.lastFleets.get(connectionId);
+        if (!fleet || Date.now() - fleet.at > FLEET_CACHE_TTL_MS)
+            return null;
+        const [statuses, gpsPositions] = await Promise.all([gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
+        if (new Set(statuses.map(status => status.vehicleId)).size !== statuses.length)
+            throw new Error('IDs de veículos duplicados nos statuses');
+        return { zones: fleet.zones, vehicles: fleet.vehicles, statuses, gpsPositions };
+    }
     private async loadSnapshot(gateway: AutocabGateway): Promise<FleetSnapshot> {
         const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
         if (new Set(zones.map(zone => zone.id)).size !== zones.length)
@@ -113,7 +140,7 @@ export class CorrectionService {
                 if (!currentZone)
                     return null;
                 const gpsPosition = gpsByVehicle.get(status.vehicleId);
-                const gpsZoneId = !isBusy(status) && gpsPosition ? await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+                const gpsZoneId = !isBusy(status) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
                 return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
             }));
             for (const candidate of candidates) {
@@ -183,14 +210,16 @@ export class CorrectionService {
             await this.recordSendFailure(changeId, error);
         }
     }
-    // Última leitura de zonas/veículos por conexão, usada pela conferência rápida de filas entre passadas.
-    private lastFleets = new Map<string, { zones: Zone[]; vehicles: Vehicle[]; companyId?: number }>();
+    // Última leitura de zonas/veículos por conexão, reaproveitada pela passada rápida entre passadas.
+    private lastFleets = new Map<string, { zones: Zone[]; vehicles: Vehicle[]; companyId?: number; at: number }>();
+    private messagesSent = 0;
     private async notifyDriverQueues(connection: CorrectionConnection, cycleId: string, snapshot: { zones: Zone[]; vehicles: Vehicle[] }, statuses: VehicleStatus[]) {
         if (!connection.driverMessages || connection.companyId === undefined || !connection.gateway)
             return;
         // Falha no aviso não desfaz a correção; fica registrada no detalhe do ciclo.
         try {
             const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter(vehicle => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+            this.messagesSent += result.messages;
             if (result.messages > 0)
                 this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ''}`);
         }
@@ -198,29 +227,18 @@ export class CorrectionService {
             this.notes.push(`avisos de fila não enviados: ${safeErrorMessage(error)}`);
         }
     }
-    // Conferência rápida entre passadas: relê só os status (uma chamada) e avisa as filas que mudaram,
-    // sem refazer a correção. Usa zonas e veículos da última passada; sem ela, não faz nada.
-    async refreshDriverMessages(connection: CorrectionConnection, statusesCache: Map<AutocabGateway, Promise<VehicleStatus[]>>): Promise<number> {
-        const fleet = this.lastFleets.get(connection.id);
-        if (!connection.driverMessages || !connection.gateway || !fleet || fleet.companyId === undefined || this.driverMessagesMode === 'off')
-            return 0;
-        const gateway = connection.gateway;
-        let statusesPromise = statusesCache.get(gateway);
-        if (!statusesPromise) {
-            statusesPromise = gateway.listVehicleStatuses();
-            statusesCache.set(gateway, statusesPromise);
-        }
-        const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-rapida:${new Date().toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter(vehicle => vehicle.companyId === fleet.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
-        return result.messages;
-    }
     async runConnection(connection: CorrectionConnection, options: {
         deadline?: number;
         snapshotCache?: Map<AutocabGateway, Promise<FleetSnapshot>>;
+        // Passada rápida da Arcoverde entre as completas: reaproveita zonas/veículos e não registra
+        // ciclo quando nada mudou, para o histórico não encher.
+        fast?: boolean;
     } = {}): Promise<string> {
         this.deadline = options.deadline ?? Infinity;
         this.deferred = false;
         this.inspectedCount = 0;
         this.notes = [];
+        this.messagesSent = 0;
         const cycleId = await this.repository.startCycle(connection.id, this.mode);
         let inspected = 0, planned = 0;
         try {
@@ -243,20 +261,23 @@ export class CorrectionService {
                     this.notes.push(`avisos de reservas não concluídos: ${safeErrorMessage(error)}`);
                 }
             }
-            // As empresas da mesma chave reaproveitam a leitura da frota feita no ciclo.
-            let snapshotPromise = options.snapshotCache?.get(gateway);
-            if (!snapshotPromise) {
-                snapshotPromise = this.loadSnapshot(gateway);
-                options.snapshotCache?.set(gateway, snapshotPromise);
-                snapshotPromise.catch(() => options.snapshotCache?.delete(gateway));
+            let snapshot = options.fast ? await this.loadFastSnapshot(connection.id, gateway) : null;
+            if (!snapshot) {
+                // As empresas da mesma chave reaproveitam a leitura da frota feita no ciclo.
+                let snapshotPromise = options.snapshotCache?.get(gateway);
+                if (!snapshotPromise) {
+                    snapshotPromise = this.loadSnapshot(gateway);
+                    options.snapshotCache?.set(gateway, snapshotPromise);
+                    snapshotPromise.catch(() => options.snapshotCache?.delete(gateway));
+                }
+                snapshot = await snapshotPromise;
+                // Com várias empresas na mesma chave, cada conexão guarda e usa somente as zonas da sua empresa.
+                if (connection.companyId !== undefined)
+                    snapshot = { ...snapshot, zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
+                await this.repository.saveZones(connection.id, snapshot.zones);
+                this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId, at: Date.now() });
             }
-            let snapshot = await snapshotPromise;
-            // Com várias empresas na mesma chave, cada conexão guarda e usa somente as zonas da sua empresa.
-            if (connection.companyId !== undefined)
-                snapshot = { ...snapshot, zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
-            await this.repository.saveZones(connection.id, snapshot.zones);
             // Avisa as mudanças de fila já vistas na leitura, antes da correção por GPS (que demora).
-            this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId });
             await this.notifyDriverQueues(connection, cycleId, snapshot, snapshot.statuses);
             if (this.mode === 'live')
                 await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
@@ -288,7 +309,11 @@ export class CorrectionService {
             if (this.deferred)
                 this.notes.push('Tempo do ciclo esgotado; veículos restantes serão retomados no próximo ciclo.');
             const outcome = this.deferred ? 'partial' : 'completed';
-            await this.repository.finishCycle(cycleId, outcome, inspected, planned, this.notes.join('. ') || null);
+            if (options.fast && outcome === 'completed' && planned === 0 && this.messagesSent === 0 && this.repository.discardCycle) {
+                await this.repository.discardCycle(cycleId);
+                return outcome;
+            }
+            await this.repository.finishCycle(cycleId, outcome, inspected, planned, [options.fast ? 'passada rápida' : '', ...this.notes].filter(Boolean).join('. ') || null);
             return outcome;
         }
         catch (error) {

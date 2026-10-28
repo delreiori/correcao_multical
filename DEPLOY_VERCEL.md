@@ -32,7 +32,7 @@ Em Settings → Environment Variables configure para Production:
 | `AUTOCAB_TIMEOUT_MS` | Opcional: tempo máximo de cada requisição à Autocab (padrão 10000) |
 | `CRON_REPEAT_INTERVAL_MS` | Opcional: intervalo das passadas extras dentro de cada cron (padrão 20000; 0 desliga) |
 | `DRIVER_MESSAGES_MODE` | Avisos de fila da Arcoverde: `off`, `dry` (padrão, só registra) ou `live` (envia, mesmo com AUTOCAB_MODE=dry) |
-| `DRIVER_MESSAGES_POLL_MS` | Opcional: a cada quantos ms as filas da Arcoverde são conferidas entre as passadas (padrão 5000; 0 desliga) |
+| `FAST_PASS_INTERVAL_MS` | Opcional: a cada quantos ms roda a passada rápida da Arcoverde entre as completas, que reposiciona e avisa (padrão 5000; 0 desliga). Aceita o nome antigo `DRIVER_MESSAGES_POLL_MS` |
 | `DRIVER_MESSAGES_TOP` | Opcional: limita o aviso aos N primeiros da fila. Vazio (padrão) = todos que mudaram de posição |
 | `DRIVER_MESSAGES_ONLY` | Opcional: restringe quem recebe os avisos a callsigns/IDs separados por vírgula (ex.: `5013`). Vazio = todos |
 | `AUTOCAB_DRIVER_MESSAGE_FIELDS` | Opcional: campos extras para enviar como urgente, em JSON (padrão `{"urgent":true}`) |

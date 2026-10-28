@@ -86,4 +86,7 @@ export class AuditRepository {
     recordDriverMessage(message: NewDriverMessage) {
         this.database.prepare('INSERT INTO driver_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), message.connectionId, message.cycleId, message.vehicleId, message.callsign, message.zoneId, message.zoneName, message.queuePosition, message.message, message.mode, message.outcome, message.httpStatus, new Date().toISOString());
     }
+    discardCycle(cycleId: string) {
+        this.database.prepare('DELETE FROM correction_cycles WHERE id=?').run(cycleId);
+    }
 }

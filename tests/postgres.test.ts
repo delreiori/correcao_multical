@@ -281,36 +281,66 @@ test('aviso da Arcoverde sai antes da correção por GPS e a Arcoverde roda ante
         const connections = [{ id: 'sao-conrado', name: 'São Conrado', companyId: 2, gateway }, { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway }];
         const runner = new NeonCycleRunner(repository, service, connections);
         await runner.runOnce();
+        assert.ok(events.indexOf('gps:1') >= 0 && events.indexOf('gps:2') > events.indexOf('gps:1'), 'Arcoverde corrige antes da São Conrado');
         setOrder([302, 301, 303]);
         events.length = 0;
         await runner.runOnce();
         assert.deepEqual(events.slice(0, 2).sort(), ['aviso:301', 'aviso:302']);
-        assert.ok(events.indexOf('gps:2') > events.indexOf('gps:1'), 'Arcoverde corrige antes da São Conrado');
     } finally { await database.close(); }
 });
-test('conferência rápida entre passadas avisa sem refazer a correção', async () => {
+test('passada rápida da Arcoverde reposiciona e avisa reaproveitando zonas, veículos e GPS de carro parado', async () => {
     const { database, repository } = await createDatabase();
     try {
         const { gateway, events, setOrder } = createArcoverdeFleet();
+        const reads: string[] = [];
+        for (const name of ['listZones', 'listVehicles', 'listVehicleStatuses', 'listGpsPositions'] as const) {
+            const original = gateway[name].bind(gateway) as () => Promise<unknown>;
+            (gateway as unknown as Record<string, () => Promise<unknown>>)[name] = async () => { reads.push(name); return original(); };
+        }
         const service = new CorrectionService(repository, rules, 'dry', 'live');
         const runner = new NeonCycleRunner(repository, service, [{ id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway }]);
-        await runner.runQuickQueueCheck();
-        assert.equal(gateway.sentMessages.length, 0, 'sem passada anterior não há zonas para conferir');
         await runner.runOnce();
         const cycles = (await repository.getDashboard()).cycles.length;
+        // Nada mudou: não consulta zonas/veículos nem GPS de carro parado e não registra ciclo.
+        reads.length = 0; events.length = 0;
+        await runner.runPriorityPass();
+        assert.deepEqual(reads.sort(), ['listGpsPositions', 'listVehicleStatuses']);
+        assert.ok(!events.some(event => event.startsWith('gps')), 'carro parado não consulta zona de novo');
+        assert.equal((await repository.getDashboard()).cycles.length, cycles, 'passada sem mudança não registra ciclo');
+        // A fila muda: a passada rápida avisa e registra o ciclo.
         setOrder([303, 301, 302]);
-        events.length = 0;
-        await runner.runQuickQueueCheck();
+        await runner.runPriorityPass();
         assert.deepEqual(gateway.sentMessages.map(message => message.vehicleId).sort(), [301, 302, 303]);
-        assert.ok(!events.some(event => event.startsWith('gps')), 'não consulta GPS');
-        assert.equal((await repository.getDashboard()).cycles.length, cycles, 'não abre ciclo novo');
-        await runner.runQuickQueueCheck();
-        assert.equal(gateway.sentMessages.length, 3, 'fila igual não repete');
-        // Outra execução com o lease: a conferência é pulada.
+        const latest = (await repository.getDashboard()).cycles;
+        assert.equal(latest.length, cycles + 1);
+        assert.match(latest[0].detail ?? '', /passada rápida/);
+        // Outra execução com o lease: a passada rápida é pulada.
         await repository.acquireCycleLease('outra');
         setOrder([301, 302, 303]);
-        await runner.runQuickQueueCheck();
+        await runner.runPriorityPass();
         assert.equal(gateway.sentMessages.length, 3);
+    } finally { await database.close(); }
+});
+test('passada rápida corrige a zona do carro que se moveu', async () => {
+    const { database, repository } = await createDatabase();
+    try {
+        const gateway = new DemoAutocabClient();
+        let latitude = -22.9;
+        gateway.listZones = async () => [{ id: 11, name: 'Praia', companyId: 1 }, { id: 12, name: 'Centro', companyId: 1 }];
+        gateway.listVehicles = async () => [{ id: 301, callsign: 'A1', companyId: 1 }];
+        gateway.listVehicleStatuses = async () => [{ vehicleId: 301, zoneId: 11, queuePosition: 1, status: 'Available', hasPenalty: false }];
+        gateway.listGpsPositions = async () => [{ vehicleId: 301, latitude, longitude: -43.2 }];
+        let lookups = 0;
+        gateway.findZoneByCoordinates = async (lat: number) => { lookups++; return lat < -22.95 ? 12 : 11; };
+        const service = new CorrectionService(repository, rules, 'dry', 'dry');
+        const runner = new NeonCycleRunner(repository, service, [{ id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway }]);
+        await runner.runOnce();
+        assert.equal(lookups, 1);
+        latitude = -23.0;
+        await runner.runPriorityPass();
+        assert.equal(lookups, 2, 'carro que se moveu consulta a zona de novo');
+        const changes = (await repository.getDashboard()).changes;
+        assert.deepEqual(changes.map(change => [change.vehicleId, change.targetZoneName]), [[301, 'Centro']]);
     } finally { await database.close(); }
 });
 test('cron confere as filas a cada poucos segundos entre as passadas completas', async () => {
@@ -319,7 +349,7 @@ test('cron confere as filas a cada poucos segundos entre as passadas completas',
     process.env.CRON_REPEAT_INTERVAL_MS = '400';
     process.env.DRIVER_MESSAGES_POLL_MS = '100';
     const calls: string[] = [];
-    const runner = { lastRunCompleted: true, async runOnce() { calls.push('passada'); }, async runQuickQueueCheck() { calls.push('fila'); } };
+    const runner = { lastRunCompleted: true, async runOnce() { calls.push('passada'); }, async runPriorityPass() { calls.push('fila'); } };
     try {
         const startedAt = Date.now();
         await runCronPasses({ runner, connections: [{ id: 'arcoverde', name: 'Arcoverde', driverMessages: true, gateway: null }] } as never, 1000);

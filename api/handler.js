@@ -95,7 +95,7 @@ function readCronRepeatIntervalMs(value = process.env.CRON_REPEAT_INTERVAL_MS) {
   const interval = Number(value ?? 2e4);
   return Number.isFinite(interval) && interval >= 0 ? interval : 2e4;
 }
-function readQueuePollIntervalMs(value = process.env.DRIVER_MESSAGES_POLL_MS) {
+function readQueuePollIntervalMs(value = process.env.FAST_PASS_INTERVAL_MS ?? process.env.DRIVER_MESSAGES_POLL_MS) {
   const interval = Number(value ?? 5e3);
   return Number.isFinite(interval) && interval >= 0 ? interval : 5e3;
 }
@@ -768,6 +768,9 @@ var PostgresAuditRepository = class {
     await this.database.query('DELETE FROM driver_messages WHERE "createdAt"<$1', [daysAgo(30)]);
     await this.database.query(`DELETE FROM plot_changes WHERE "createdAt"<$1 AND NOT (mode='live' AND outcome IN ('pending','unknown','unconfirmed'))`, [daysAgo(90)]);
   }
+  async discardCycle(cycleId) {
+    await this.database.query("DELETE FROM correction_cycles WHERE id=$1", [cycleId]);
+  }
 };
 
 // server/rules.ts
@@ -893,7 +896,9 @@ async function resolveCompanyId(connection, gateway) {
   }
   return matchingCompanies[0].id;
 }
-var GPS_LOOKUP_CONCURRENCY = 8;
+var GPS_LOOKUP_CONCURRENCY = 16;
+var ZONE_LOOKUP_TTL_MS = 12e4;
+var FLEET_CACHE_TTL_MS = 6e4;
 function safeErrorMessage(error) {
   return error instanceof Error ? error.message : "Falha n\xE3o identificada na corre\xE7\xE3o";
 }
@@ -918,6 +923,29 @@ var CorrectionService = class {
     this.driverMessageRecipients = driverMessageRecipients;
     this.driverMessagesTop = driverMessagesTop;
     this.reservationMessagesMode = reservationMessagesMode;
+  }
+  zoneLookups = /* @__PURE__ */ new Map();
+  // Só consulta a Autocab quando o carro se moveu desde a última consulta; parado no ponto, reaproveita.
+  async lookupZone(gateway, vehicleId, latitude, longitude, companyId) {
+    const key = `${companyId ?? ""}:${vehicleId}:${latitude.toFixed(4)}:${longitude.toFixed(4)}`;
+    const cached = this.zoneLookups.get(key);
+    if (cached && Date.now() - cached.at < ZONE_LOOKUP_TTL_MS)
+      return cached.zoneId;
+    const zoneId = await gateway.findZoneByCoordinates(latitude, longitude, companyId);
+    if (this.zoneLookups.size > 2e4)
+      this.zoneLookups.clear();
+    this.zoneLookups.set(key, { zoneId, at: Date.now() });
+    return zoneId;
+  }
+  // Passada rápida: zonas e veículos da última leitura (se recentes) e só status e GPS novos.
+  async loadFastSnapshot(connectionId, gateway) {
+    const fleet = this.lastFleets.get(connectionId);
+    if (!fleet || Date.now() - fleet.at > FLEET_CACHE_TTL_MS)
+      return null;
+    const [statuses, gpsPositions] = await Promise.all([gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
+    if (new Set(statuses.map((status) => status.vehicleId)).size !== statuses.length)
+      throw new Error("IDs de ve\xEDculos duplicados nos statuses");
+    return { zones: fleet.zones, vehicles: fleet.vehicles, statuses, gpsPositions };
   }
   async loadSnapshot(gateway) {
     const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
@@ -980,7 +1008,7 @@ var CorrectionService = class {
         if (!currentZone)
           return null;
         const gpsPosition = gpsByVehicle.get(status.vehicleId);
-        const gpsZoneId = !isBusy(status) && gpsPosition ? await gateway.findZoneByCoordinates(gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+        const gpsZoneId = !isBusy(status) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
         return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
       }));
       for (const candidate of candidates) {
@@ -1048,39 +1076,27 @@ var CorrectionService = class {
       await this.recordSendFailure(changeId, error);
     }
   }
-  // Última leitura de zonas/veículos por conexão, usada pela conferência rápida de filas entre passadas.
+  // Última leitura de zonas/veículos por conexão, reaproveitada pela passada rápida entre passadas.
   lastFleets = /* @__PURE__ */ new Map();
+  messagesSent = 0;
   async notifyDriverQueues(connection, cycleId, snapshot, statuses) {
     if (!connection.driverMessages || connection.companyId === void 0 || !connection.gateway)
       return;
     try {
       const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+      this.messagesSent += result.messages;
       if (result.messages > 0)
         this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
     } catch (error) {
       this.notes.push(`avisos de fila n\xE3o enviados: ${safeErrorMessage(error)}`);
     }
   }
-  // Conferência rápida entre passadas: relê só os status (uma chamada) e avisa as filas que mudaram,
-  // sem refazer a correção. Usa zonas e veículos da última passada; sem ela, não faz nada.
-  async refreshDriverMessages(connection, statusesCache) {
-    const fleet = this.lastFleets.get(connection.id);
-    if (!connection.driverMessages || !connection.gateway || !fleet || fleet.companyId === void 0 || this.driverMessagesMode === "off")
-      return 0;
-    const gateway = connection.gateway;
-    let statusesPromise = statusesCache.get(gateway);
-    if (!statusesPromise) {
-      statusesPromise = gateway.listVehicleStatuses();
-      statusesCache.set(gateway, statusesPromise);
-    }
-    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-rapida:${(/* @__PURE__ */ new Date()).toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter((vehicle) => vehicle.companyId === fleet.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
-    return result.messages;
-  }
   async runConnection(connection, options = {}) {
     this.deadline = options.deadline ?? Infinity;
     this.deferred = false;
     this.inspectedCount = 0;
     this.notes = [];
+    this.messagesSent = 0;
     const cycleId = await this.repository.startCycle(connection.id, this.mode);
     let inspected = 0, planned = 0;
     try {
@@ -1111,17 +1127,20 @@ var CorrectionService = class {
           this.notes.push(`avisos de reservas n\xE3o conclu\xEDdos: ${safeErrorMessage(error)}`);
         }
       }
-      let snapshotPromise = options.snapshotCache?.get(gateway);
-      if (!snapshotPromise) {
-        snapshotPromise = this.loadSnapshot(gateway);
-        options.snapshotCache?.set(gateway, snapshotPromise);
-        snapshotPromise.catch(() => options.snapshotCache?.delete(gateway));
+      let snapshot = options.fast ? await this.loadFastSnapshot(connection.id, gateway) : null;
+      if (!snapshot) {
+        let snapshotPromise = options.snapshotCache?.get(gateway);
+        if (!snapshotPromise) {
+          snapshotPromise = this.loadSnapshot(gateway);
+          options.snapshotCache?.set(gateway, snapshotPromise);
+          snapshotPromise.catch(() => options.snapshotCache?.delete(gateway));
+        }
+        snapshot = await snapshotPromise;
+        if (connection.companyId !== void 0)
+          snapshot = { ...snapshot, zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
+        await this.repository.saveZones(connection.id, snapshot.zones);
+        this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId, at: Date.now() });
       }
-      let snapshot = await snapshotPromise;
-      if (connection.companyId !== void 0)
-        snapshot = { ...snapshot, zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
-      await this.repository.saveZones(connection.id, snapshot.zones);
-      this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId });
       await this.notifyDriverQueues(connection, cycleId, snapshot, snapshot.statuses);
       if (this.mode === "live")
         await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
@@ -1149,7 +1168,11 @@ var CorrectionService = class {
       if (this.deferred)
         this.notes.push("Tempo do ciclo esgotado; ve\xEDculos restantes ser\xE3o retomados no pr\xF3ximo ciclo.");
       const outcome = this.deferred ? "partial" : "completed";
-      await this.repository.finishCycle(cycleId, outcome, inspected, planned, this.notes.join(". ") || null);
+      if (options.fast && outcome === "completed" && planned === 0 && this.messagesSent === 0 && this.repository.discardCycle) {
+        await this.repository.discardCycle(cycleId);
+        return outcome;
+      }
+      await this.repository.finishCycle(cycleId, outcome, inspected, planned, [options.fast ? "passada r\xE1pida" : "", ...this.notes].filter(Boolean).join(". ") || null);
       return outcome;
     } catch (error) {
       console.error(`Ciclo ${connection.id} falhou: ${safeErrorMessage(error)}`);
@@ -1175,9 +1198,10 @@ var NeonCycleRunner = class {
     this.service = service;
     this.connections = connections;
   }
-  // Conferência rápida das filas com aviso (entre passadas), sob o mesmo lease das passadas.
-  async runQuickQueueCheck() {
-    if (this.running || !this.connections.some((connection) => connection.driverMessages))
+  // Passada rápida da Arcoverde entre as completas (reposiciona e avisa), sob o mesmo lease.
+  async runPriorityPass() {
+    const priorityConnections = this.connections.filter((connection) => connection.driverMessages);
+    if (this.running || priorityConnections.length === 0)
       return;
     this.running = true;
     const owner = randomUUID2();
@@ -1186,14 +1210,9 @@ var NeonCycleRunner = class {
       acquired = await this.repository.acquireCycleLease(owner);
       if (!acquired)
         return;
-      const statusesCache = /* @__PURE__ */ new Map();
-      for (const connection of this.connections.filter((connection2) => connection2.driverMessages)) {
-        try {
-          await this.service.refreshDriverMessages(connection, statusesCache);
-        } catch (error) {
-          console.error(`Confer\xEAncia r\xE1pida de filas ${connection.id} falhou: ${error instanceof Error ? error.message : "erro"}`);
-        }
-      }
+      const deadline = Date.now() + 3e4;
+      for (const connection of priorityConnections)
+        await this.service.runConnection(connection, { fast: true, deadline });
     } finally {
       try {
         if (acquired)
@@ -1400,7 +1419,7 @@ async function runCronPasses(runtime, windowMs = CRON_PASS_WINDOW_MS) {
       const nextCheck = pollIntervalMs > 0 ? Math.min(until, Date.now() + pollIntervalMs) : until;
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, nextCheck - Date.now())));
       if (pollIntervalMs > 0 && Date.now() < windowEnd)
-        await runtime.runner.runQuickQueueCheck();
+        await runtime.runner.runPriorityPass();
     }
   }
   let lastPassMs = 0;

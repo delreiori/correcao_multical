@@ -24,9 +24,10 @@ export class NeonCycleRunner implements CycleRuntime {
     lastRunCompleted = false;
     private lastPruneAt = 0;
     constructor(repository: PostgresAuditRepository, service: CorrectionService, connections: CorrectionConnection[]) { this.repository = repository; this.service = service; this.connections = connections; }
-    // Conferência rápida das filas com aviso (entre passadas), sob o mesmo lease das passadas.
-    async runQuickQueueCheck() {
-        if (this.running || !this.connections.some(connection => connection.driverMessages))
+    // Passada rápida da Arcoverde entre as completas (reposiciona e avisa), sob o mesmo lease.
+    async runPriorityPass() {
+        const priorityConnections = this.connections.filter(connection => connection.driverMessages);
+        if (this.running || priorityConnections.length === 0)
             return;
         this.running = true;
         const owner = randomUUID();
@@ -35,15 +36,9 @@ export class NeonCycleRunner implements CycleRuntime {
             acquired = await this.repository.acquireCycleLease(owner);
             if (!acquired)
                 return;
-            const statusesCache = new Map();
-            for (const connection of this.connections.filter(connection => connection.driverMessages)) {
-                try {
-                    await this.service.refreshDriverMessages(connection, statusesCache);
-                }
-                catch (error) {
-                    console.error(`Conferência rápida de filas ${connection.id} falhou: ${error instanceof Error ? error.message : 'erro'}`);
-                }
-            }
+            const deadline = Date.now() + 30_000;
+            for (const connection of priorityConnections)
+                await this.service.runConnection(connection, { fast: true, deadline });
         }
         finally {
             try {

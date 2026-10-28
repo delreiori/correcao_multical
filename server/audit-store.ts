@@ -10,6 +10,8 @@ export interface AuditStore {
     recoverInterruptedCycles(): Awaitable<void>;
     startCycle(connectionId: string, mode: OperatingMode): Awaitable<string>;
     finishCycle(cycleId: string, outcome: string, inspected: number, planned: number, detail?: string | null): Awaitable<void>;
+    // Apaga um ciclo sem nada a registrar (passada rápida sem mudanças).
+    discardCycle?(cycleId: string): Awaitable<void>;
     createChange(connectionId: string, cycleId: string, mode: OperatingMode, change: PlannedChange, outcome: ChangeOutcome): Awaitable<string>;
     finishChange(changeId: string, outcome: ChangeOutcome, httpStatus?: number | null, detail?: string | null): Awaitable<void>;
     listUnresolvedChanges(connectionId: string): Awaitable<ChangeLog[]>;

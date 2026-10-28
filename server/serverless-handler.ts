@@ -38,17 +38,17 @@ function logBackendError(context: string, error: unknown) {
 export async function runCronPasses(runtime: Pick<NeonRuntime, 'runner' | 'connections'>, windowMs = CRON_PASS_WINDOW_MS) {
     const startedAt = Date.now();
     const repeatIntervalMs = readCronRepeatIntervalMs();
-    // Só confere filas entre passadas se alguma empresa tem aviso aos motoristas.
+    // Passadas rápidas entre as completas só para empresas com aviso aos motoristas (Arcoverde).
     const pollIntervalMs = runtime.connections.some(connection => connection.driverMessages) ? readQueuePollIntervalMs() : 0;
     const windowEnd = startedAt + windowMs;
-    // Espera até o horário indicado; nesse meio tempo confere as filas com aviso a cada pollIntervalMs,
-    // para o motorista ser avisado em segundos, sem esperar a próxima passada completa.
+    // Espera até o horário indicado; nesse meio tempo faz a passada rápida da Arcoverde a cada
+    // pollIntervalMs (reposiciona e avisa), sem esperar a próxima passada completa.
     async function waitWithQueueChecks(until: number) {
         while (Date.now() < until) {
             const nextCheck = pollIntervalMs > 0 ? Math.min(until, Date.now() + pollIntervalMs) : until;
             await new Promise(resolve => setTimeout(resolve, Math.max(0, nextCheck - Date.now())));
             if (pollIntervalMs > 0 && Date.now() < windowEnd)
-                await runtime.runner.runQuickQueueCheck();
+                await runtime.runner.runPriorityPass();
         }
     }
     let lastPassMs = 0;
@@ -60,7 +60,7 @@ export async function runCronPasses(runtime: Pick<NeonRuntime, 'runner' | 'conne
             await runtime.runner.runOnce();
             lastPassMs = Date.now() - passStartedAt;
         }
-        // Sem tempo para outra passada completa: segue só conferindo as filas até o fim da janela.
+        // Sem tempo para outra passada completa: segue só com as passadas rápidas até o fim da janela.
         if (pollIntervalMs > 0)
             await waitWithQueueChecks(windowEnd - pollIntervalMs);
     }
