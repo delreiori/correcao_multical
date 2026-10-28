@@ -9,3 +9,8 @@ export function readCronRepeatIntervalMs(value = process.env.CRON_REPEAT_INTERVA
     const interval = Number(value ?? 20_000);
     return Number.isFinite(interval) && interval >= 0 ? interval : 20_000;
 }
+// Conferência rápida das filas com aviso entre passadas (DRIVER_MESSAGES_POLL_MS). 0 desliga.
+export function readQueuePollIntervalMs(value = process.env.DRIVER_MESSAGES_POLL_MS) {
+    const interval = Number(value ?? 5_000);
+    return Number.isFinite(interval) && interval >= 0 ? interval : 5_000;
+}

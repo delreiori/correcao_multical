@@ -24,6 +24,7 @@ Na Arcoverde, quando a posição de um motorista livre na fila de uma zona muda 
 - Fila igual à do último aviso não repete a mensagem. Na primeira leitura de cada zona a fila só é guardada.
 - Só recebe quem já estava na fila e teve a própria posição alterada (alguém saiu, entrou ou foi colocado à frente dele). Vale para todos da fila; `DRIVER_MESSAGES_TOP` limita aos N primeiros, se necessário.
 - Quem acabou de entrar na fila não recebe e o aviso nem é registrado.
+- Velocidade: a Arcoverde roda antes das outras empresas em cada passada; o aviso sai logo após a leitura da frota, antes da correção por GPS (e de novo após os envios, para as filas alteradas pelo próprio sistema); entre as passadas, as filas são conferidas a cada 5 s (`DRIVER_MESSAGES_POLL_MS`) com uma única leitura de status; e os avisos de todas as zonas saem juntos, 16 por vez.
 - O texto lista os 7 primeiros e resume o restante como `+N`.
 
 Todos os motoristas livres da zona recebem os avisos. Para testar com poucos motoristas, `DRIVER_MESSAGES_ONLY` restringe a uma lista de callsigns ou IDs separados por vírgula (ex.: `5013`); a fila listada na mensagem continua completa.

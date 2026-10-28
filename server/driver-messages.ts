@@ -10,7 +10,8 @@ export interface ZoneQueue {
     // Motoristas livres na zona, na ordem da fila (1º, 2º, 3º...).
     drivers: { vehicleId: number; callsign: string }[];
 }
-const MESSAGE_CONCURRENCY = 8;
+// Avisos enviados ao mesmo tempo; limita a carga na Autocab.
+const MESSAGE_CONCURRENCY = 16;
 // Filas das zonas da empresa. Motorista ocupado (já trabalhando) não entra na fila nem recebe o aviso;
 // zonas protegidas (NAK, FORA DE AREA) não têm fila a avisar.
 export function buildZoneQueues(zones: Zone[], statuses: VehicleStatus[], vehiclesById: Map<number, Vehicle>, rules: ZoneRules): ZoneQueue[] {
@@ -60,41 +61,47 @@ export async function notifyQueueChanges(options: {
     const vehiclesById = new Map(options.vehicles.map(vehicle => [vehicle.id, vehicle]));
     const previousSignatures = await store.getZoneQueueSignatures(connectionId);
     let zonesChanged = 0, messages = 0, failed = 0;
+    // Monta todos os avisos de todas as zonas antes de enviar, para nenhuma zona esperar a outra.
+    const deliveries: { queue: ZoneQueue; driver: { vehicleId: number; callsign: string }; queuePosition: number }[] = [];
+    const signatureWrites: Promise<void>[] = [];
     for (const queue of buildZoneQueues(options.zones, options.statuses, vehiclesById, options.rules)) {
         const signature = queueSignature(queue);
         const previous = previousSignatures.get(queue.zone.id);
         if (previous === signature)
             continue;
-        await store.saveZoneQueueSignature(connectionId, queue.zone.id, signature);
+        signatureWrites.push(Promise.resolve(store.saveZoneQueueSignature(connectionId, queue.zone.id, signature)));
         if (previous === undefined || queue.drivers.length === 0)
             continue;
         const previousPositions = new Map(previous.split(',').filter(Boolean).map((vehicleId, index) => [Number(vehicleId), index]));
         const recipients = queue.drivers.slice(0, topDrivers ?? undefined)
-            .map((driver, queuePosition) => ({ driver, queuePosition }))
+            .map((driver, queuePosition) => ({ queue, driver, queuePosition }))
             .filter(({ driver, queuePosition }) => previousPositions.has(driver.vehicleId) && previousPositions.get(driver.vehicleId) !== queuePosition)
             .filter(({ driver }) => !allowed || allowed.has(driver.callsign) || allowed.has(String(driver.vehicleId)));
         if (recipients.length === 0)
             continue;
         zonesChanged++;
-        for (let start = 0; start < recipients.length; start += MESSAGE_CONCURRENCY) {
-            await Promise.all(recipients.slice(start, start + MESSAGE_CONCURRENCY).map(async ({ driver, queuePosition }) => {
-                const message = buildQueueMessage(options.companyName, queue, queuePosition);
-                let outcome: DriverMessageOutcome = 'simulated', httpStatus: number | null = null;
-                if (sendForReal) {
-                    try {
-                        httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
-                        outcome = 'sent';
-                    }
-                    catch (error) {
-                        httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
-                        outcome = 'failed';
-                        failed++;
-                    }
+        deliveries.push(...recipients);
+    }
+    // A fila nova é gravada antes do envio: uma leitura concorrente não repete os mesmos avisos.
+    await Promise.all(signatureWrites);
+    for (let start = 0; start < deliveries.length; start += MESSAGE_CONCURRENCY) {
+        await Promise.all(deliveries.slice(start, start + MESSAGE_CONCURRENCY).map(async ({ queue, driver, queuePosition }) => {
+            const message = buildQueueMessage(options.companyName, queue, queuePosition);
+            let outcome: DriverMessageOutcome = 'simulated', httpStatus: number | null = null;
+            if (sendForReal) {
+                try {
+                    httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
+                    outcome = 'sent';
                 }
-                messages++;
-                await store.recordDriverMessage!({ connectionId, cycleId: options.cycleId, vehicleId: driver.vehicleId, callsign: driver.callsign, zoneId: queue.zone.id, zoneName: queue.zone.name, queuePosition: queuePosition + 1, message, mode: options.mode, outcome, httpStatus });
-            }));
-        }
+                catch (error) {
+                    httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+                    outcome = 'failed';
+                    failed++;
+                }
+            }
+            messages++;
+            await store.recordDriverMessage!({ connectionId, cycleId: options.cycleId, vehicleId: driver.vehicleId, callsign: driver.callsign, zoneId: queue.zone.id, zoneName: queue.zone.name, queuePosition: queuePosition + 1, message, mode: options.mode, outcome, httpStatus });
+        }));
     }
     return { zonesChanged, messages, failed };
 }

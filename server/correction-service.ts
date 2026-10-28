@@ -3,7 +3,7 @@ import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
 import { chooseTargetZone, findOutsideZone, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
-import type { FleetSnapshot, OperatingMode, PlannedChange, VehicleStatus } from '../shared/types.ts';
+import type { FleetSnapshot, OperatingMode, PlannedChange, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
 import { notifyQueueChanges } from './driver-messages.ts';
 import { notifyReservations } from './reservation-messages.ts';
@@ -183,6 +183,36 @@ export class CorrectionService {
             await this.recordSendFailure(changeId, error);
         }
     }
+    // Última leitura de zonas/veículos por conexão, usada pela conferência rápida de filas entre passadas.
+    private lastFleets = new Map<string, { zones: Zone[]; vehicles: Vehicle[]; companyId?: number }>();
+    private async notifyDriverQueues(connection: CorrectionConnection, cycleId: string, snapshot: { zones: Zone[]; vehicles: Vehicle[] }, statuses: VehicleStatus[]) {
+        if (!connection.driverMessages || connection.companyId === undefined || !connection.gateway)
+            return;
+        // Falha no aviso não desfaz a correção; fica registrada no detalhe do ciclo.
+        try {
+            const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter(vehicle => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+            if (result.messages > 0)
+                this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ''}`);
+        }
+        catch (error) {
+            this.notes.push(`avisos de fila não enviados: ${safeErrorMessage(error)}`);
+        }
+    }
+    // Conferência rápida entre passadas: relê só os status (uma chamada) e avisa as filas que mudaram,
+    // sem refazer a correção. Usa zonas e veículos da última passada; sem ela, não faz nada.
+    async refreshDriverMessages(connection: CorrectionConnection, statusesCache: Map<AutocabGateway, Promise<VehicleStatus[]>>): Promise<number> {
+        const fleet = this.lastFleets.get(connection.id);
+        if (!connection.driverMessages || !connection.gateway || !fleet || fleet.companyId === undefined || this.driverMessagesMode === 'off')
+            return 0;
+        const gateway = connection.gateway;
+        let statusesPromise = statusesCache.get(gateway);
+        if (!statusesPromise) {
+            statusesPromise = gateway.listVehicleStatuses();
+            statusesCache.set(gateway, statusesPromise);
+        }
+        const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-rapida:${new Date().toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter(vehicle => vehicle.companyId === fleet.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+        return result.messages;
+    }
     async runConnection(connection: CorrectionConnection, options: {
         deadline?: number;
         snapshotCache?: Map<AutocabGateway, Promise<FleetSnapshot>>;
@@ -225,6 +255,9 @@ export class CorrectionService {
             if (connection.companyId !== undefined)
                 snapshot = { ...snapshot, zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
             await this.repository.saveZones(connection.id, snapshot.zones);
+            // Avisa as mudanças de fila já vistas na leitura, antes da correção por GPS (que demora).
+            this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId });
+            await this.notifyDriverQueues(connection, cycleId, snapshot, snapshot.statuses);
             if (this.mode === 'live')
                 await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
             const changes = await this.planChanges(connection, snapshot, gateway);
@@ -249,17 +282,9 @@ export class CorrectionService {
             finally {
                 statusesAfterSend = await this.verifySentChanges(gateway, sentChanges);
             }
-            if (connection.driverMessages && connection.companyId !== undefined) {
-                // Falha no aviso não desfaz a correção; fica registrada no detalhe do ciclo.
-                try {
-                    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter(vehicle => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
-                    if (result.messages > 0)
-                        this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ''}`);
-                }
-                catch (error) {
-                    this.notes.push(`avisos de fila não enviados: ${safeErrorMessage(error)}`);
-                }
-            }
+            // Depois dos envios, avisa as filas alteradas pelas próprias correções.
+            if (statusesAfterSend)
+                await this.notifyDriverQueues(connection, cycleId, snapshot, statusesAfterSend);
             if (this.deferred)
                 this.notes.push('Tempo do ciclo esgotado; veículos restantes serão retomados no próximo ciclo.');
             const outcome = this.deferred ? 'partial' : 'completed';

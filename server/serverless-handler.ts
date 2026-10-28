@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { createNeonRuntime, CycleAlreadyRunningError } from './neon-runtime.ts';
 import { listCompaniesForConnections } from './companies.ts';
-import { CRON_PASS_WINDOW_MS, readCronRepeatIntervalMs } from './execution-limits.ts';
+import { CRON_PASS_WINDOW_MS, readCronRepeatIntervalMs, readQueuePollIntervalMs } from './execution-limits.ts';
 import { waitUntil } from '@vercel/functions';
 export type NeonRuntime = Awaited<ReturnType<typeof createNeonRuntime>>;
 function hasBearerToken(request: IncomingMessage, token: string) {
@@ -35,18 +35,34 @@ function logBackendError(context: string, error: unknown) {
 }
 // Passadas do cron: a primeira e, enquanto couberem antes do próximo disparo, passadas extras a cada
 // CRON_REPEAT_INTERVAL_MS. Nunca rejeita; o resultado fica no histórico de ciclos e no log.
-async function runCronPasses(runtime: NeonRuntime) {
+export async function runCronPasses(runtime: Pick<NeonRuntime, 'runner' | 'connections'>, windowMs = CRON_PASS_WINDOW_MS) {
     const startedAt = Date.now();
     const repeatIntervalMs = readCronRepeatIntervalMs();
+    // Só confere filas entre passadas se alguma empresa tem aviso aos motoristas.
+    const pollIntervalMs = runtime.connections.some(connection => connection.driverMessages) ? readQueuePollIntervalMs() : 0;
+    const windowEnd = startedAt + windowMs;
+    // Espera até o horário indicado; nesse meio tempo confere as filas com aviso a cada pollIntervalMs,
+    // para o motorista ser avisado em segundos, sem esperar a próxima passada completa.
+    async function waitWithQueueChecks(until: number) {
+        while (Date.now() < until) {
+            const nextCheck = pollIntervalMs > 0 ? Math.min(until, Date.now() + pollIntervalMs) : until;
+            await new Promise(resolve => setTimeout(resolve, Math.max(0, nextCheck - Date.now())));
+            if (pollIntervalMs > 0 && Date.now() < windowEnd)
+                await runtime.runner.runQuickQueueCheck();
+        }
+    }
     let lastPassMs = 0;
     try {
-        for (let pass = 0; pass === 0 || (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS); pass++) {
+        for (let pass = 0; pass === 0 || (repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() + repeatIntervalMs + lastPassMs < windowEnd); pass++) {
             if (pass > 0)
-                await new Promise(resolve => setTimeout(resolve, repeatIntervalMs));
+                await waitWithQueueChecks(Date.now() + repeatIntervalMs);
             const passStartedAt = Date.now();
             await runtime.runner.runOnce();
             lastPassMs = Date.now() - passStartedAt;
         }
+        // Sem tempo para outra passada completa: segue só conferindo as filas até o fim da janela.
+        if (pollIntervalMs > 0)
+            await waitWithQueueChecks(windowEnd - pollIntervalMs);
     }
     catch (error) {
         // Execução anterior (ou de outro disparo) ainda ativa: este disparo só é pulado.

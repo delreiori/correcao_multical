@@ -24,6 +24,37 @@ export class NeonCycleRunner implements CycleRuntime {
     lastRunCompleted = false;
     private lastPruneAt = 0;
     constructor(repository: PostgresAuditRepository, service: CorrectionService, connections: CorrectionConnection[]) { this.repository = repository; this.service = service; this.connections = connections; }
+    // Conferência rápida das filas com aviso (entre passadas), sob o mesmo lease das passadas.
+    async runQuickQueueCheck() {
+        if (this.running || !this.connections.some(connection => connection.driverMessages))
+            return;
+        this.running = true;
+        const owner = randomUUID();
+        let acquired = false;
+        try {
+            acquired = await this.repository.acquireCycleLease(owner);
+            if (!acquired)
+                return;
+            const statusesCache = new Map();
+            for (const connection of this.connections.filter(connection => connection.driverMessages)) {
+                try {
+                    await this.service.refreshDriverMessages(connection, statusesCache);
+                }
+                catch (error) {
+                    console.error(`Conferência rápida de filas ${connection.id} falhou: ${error instanceof Error ? error.message : 'erro'}`);
+                }
+            }
+        }
+        finally {
+            try {
+                if (acquired)
+                    await this.repository.releaseCycleLease(owner);
+            }
+            finally {
+                this.running = false;
+            }
+        }
+    }
     async runOnce() {
         if (this.running)
             throw new CycleAlreadyRunningError('Ciclo já em andamento');
@@ -46,8 +77,12 @@ export class NeonCycleRunner implements CycleRuntime {
             let completedConnections = 0;
             const nextConnectionIndex = await this.repository.getVehicleCursor(':connection-cursor');
             const startIndex = Math.max(0, nextConnectionIndex) % Math.max(1, this.connections.length);
-            for (let offset = 0; offset < this.connections.length; offset++) {
-                const connectionIndex = (startIndex + offset) % this.connections.length;
+            // Empresas com aviso aos motoristas (Arcoverde) rodam primeiro, para o aviso não esperar as
+            // outras; as demais seguem o rodízio.
+            const order = this.connections.map((_, offset) => (startIndex + offset) % this.connections.length)
+                .sort((left, right) => Number(Boolean(this.connections[right].driverMessages)) - Number(Boolean(this.connections[left].driverMessages)));
+            for (let offset = 0; offset < order.length; offset++) {
+                const connectionIndex = order[offset];
                 const connection = this.connections[connectionIndex];
                 if (Date.now() > deadline - 15000)
                     break;

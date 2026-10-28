@@ -95,6 +95,10 @@ function readCronRepeatIntervalMs(value = process.env.CRON_REPEAT_INTERVAL_MS) {
   const interval = Number(value ?? 2e4);
   return Number.isFinite(interval) && interval >= 0 ? interval : 2e4;
 }
+function readQueuePollIntervalMs(value = process.env.DRIVER_MESSAGES_POLL_MS) {
+  const interval = Number(value ?? 5e3);
+  return Number.isFinite(interval) && interval >= 0 ? interval : 5e3;
+}
 
 // server/neon-runtime.ts
 import { Pool } from "pg";
@@ -809,7 +813,7 @@ function describeChange(status, currentZone, targetZone, callsign, gpsPosition, 
 }
 
 // server/driver-messages.ts
-var MESSAGE_CONCURRENCY = 8;
+var MESSAGE_CONCURRENCY = 16;
 function buildZoneQueues(zones, statuses, vehiclesById, rules) {
   return zones.filter((zone) => !isProtectedZone(zone, rules)).map((zone) => {
     const drivers = statuses.filter((status) => status.zoneId === zone.id && !isBusy(status) && vehiclesById.has(status.vehicleId)).sort((left, right) => (left.queuePosition ?? Infinity) - (right.queuePosition ?? Infinity) || left.vehicleId - right.vehicleId).map((status) => ({ vehicleId: status.vehicleId, callsign: vehiclesById.get(status.vehicleId).callsign }));
@@ -834,37 +838,41 @@ async function notifyQueueChanges(options) {
   const vehiclesById = new Map(options.vehicles.map((vehicle) => [vehicle.id, vehicle]));
   const previousSignatures = await store.getZoneQueueSignatures(connectionId);
   let zonesChanged = 0, messages = 0, failed = 0;
+  const deliveries = [];
+  const signatureWrites = [];
   for (const queue of buildZoneQueues(options.zones, options.statuses, vehiclesById, options.rules)) {
     const signature = queueSignature(queue);
     const previous = previousSignatures.get(queue.zone.id);
     if (previous === signature)
       continue;
-    await store.saveZoneQueueSignature(connectionId, queue.zone.id, signature);
+    signatureWrites.push(Promise.resolve(store.saveZoneQueueSignature(connectionId, queue.zone.id, signature)));
     if (previous === void 0 || queue.drivers.length === 0)
       continue;
     const previousPositions = new Map(previous.split(",").filter(Boolean).map((vehicleId, index) => [Number(vehicleId), index]));
-    const recipients = queue.drivers.slice(0, topDrivers ?? void 0).map((driver, queuePosition) => ({ driver, queuePosition })).filter(({ driver, queuePosition }) => previousPositions.has(driver.vehicleId) && previousPositions.get(driver.vehicleId) !== queuePosition).filter(({ driver }) => !allowed || allowed.has(driver.callsign) || allowed.has(String(driver.vehicleId)));
+    const recipients = queue.drivers.slice(0, topDrivers ?? void 0).map((driver, queuePosition) => ({ queue, driver, queuePosition })).filter(({ driver, queuePosition }) => previousPositions.has(driver.vehicleId) && previousPositions.get(driver.vehicleId) !== queuePosition).filter(({ driver }) => !allowed || allowed.has(driver.callsign) || allowed.has(String(driver.vehicleId)));
     if (recipients.length === 0)
       continue;
     zonesChanged++;
-    for (let start = 0; start < recipients.length; start += MESSAGE_CONCURRENCY) {
-      await Promise.all(recipients.slice(start, start + MESSAGE_CONCURRENCY).map(async ({ driver, queuePosition }) => {
-        const message = buildQueueMessage(options.companyName, queue, queuePosition);
-        let outcome = "simulated", httpStatus = null;
-        if (sendForReal) {
-          try {
-            httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
-            outcome = "sent";
-          } catch (error) {
-            httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
-            outcome = "failed";
-            failed++;
-          }
+    deliveries.push(...recipients);
+  }
+  await Promise.all(signatureWrites);
+  for (let start = 0; start < deliveries.length; start += MESSAGE_CONCURRENCY) {
+    await Promise.all(deliveries.slice(start, start + MESSAGE_CONCURRENCY).map(async ({ queue, driver, queuePosition }) => {
+      const message = buildQueueMessage(options.companyName, queue, queuePosition);
+      let outcome = "simulated", httpStatus = null;
+      if (sendForReal) {
+        try {
+          httpStatus = await gateway.sendDriverMessage(driver.vehicleId, message);
+          outcome = "sent";
+        } catch (error) {
+          httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+          outcome = "failed";
+          failed++;
         }
-        messages++;
-        await store.recordDriverMessage({ connectionId, cycleId: options.cycleId, vehicleId: driver.vehicleId, callsign: driver.callsign, zoneId: queue.zone.id, zoneName: queue.zone.name, queuePosition: queuePosition + 1, message, mode: options.mode, outcome, httpStatus });
-      }));
-    }
+      }
+      messages++;
+      await store.recordDriverMessage({ connectionId, cycleId: options.cycleId, vehicleId: driver.vehicleId, callsign: driver.callsign, zoneId: queue.zone.id, zoneName: queue.zone.name, queuePosition: queuePosition + 1, message, mode: options.mode, outcome, httpStatus });
+    }));
   }
   return { zonesChanged, messages, failed };
 }
@@ -1040,6 +1048,34 @@ var CorrectionService = class {
       await this.recordSendFailure(changeId, error);
     }
   }
+  // Última leitura de zonas/veículos por conexão, usada pela conferência rápida de filas entre passadas.
+  lastFleets = /* @__PURE__ */ new Map();
+  async notifyDriverQueues(connection, cycleId, snapshot, statuses) {
+    if (!connection.driverMessages || connection.companyId === void 0 || !connection.gateway)
+      return;
+    try {
+      const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+      if (result.messages > 0)
+        this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
+    } catch (error) {
+      this.notes.push(`avisos de fila n\xE3o enviados: ${safeErrorMessage(error)}`);
+    }
+  }
+  // Conferência rápida entre passadas: relê só os status (uma chamada) e avisa as filas que mudaram,
+  // sem refazer a correção. Usa zonas e veículos da última passada; sem ela, não faz nada.
+  async refreshDriverMessages(connection, statusesCache) {
+    const fleet = this.lastFleets.get(connection.id);
+    if (!connection.driverMessages || !connection.gateway || !fleet || fleet.companyId === void 0 || this.driverMessagesMode === "off")
+      return 0;
+    const gateway = connection.gateway;
+    let statusesPromise = statusesCache.get(gateway);
+    if (!statusesPromise) {
+      statusesPromise = gateway.listVehicleStatuses();
+      statusesCache.set(gateway, statusesPromise);
+    }
+    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-rapida:${(/* @__PURE__ */ new Date()).toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter((vehicle) => vehicle.companyId === fleet.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+    return result.messages;
+  }
   async runConnection(connection, options = {}) {
     this.deadline = options.deadline ?? Infinity;
     this.deferred = false;
@@ -1085,6 +1121,8 @@ var CorrectionService = class {
       if (connection.companyId !== void 0)
         snapshot = { ...snapshot, zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
       await this.repository.saveZones(connection.id, snapshot.zones);
+      this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId });
+      await this.notifyDriverQueues(connection, cycleId, snapshot, snapshot.statuses);
       if (this.mode === "live")
         await this.reconcileUnresolvedChanges(connection.id, snapshot.statuses);
       const changes = await this.planChanges(connection, snapshot, gateway);
@@ -1106,15 +1144,8 @@ var CorrectionService = class {
       } finally {
         statusesAfterSend = await this.verifySentChanges(gateway, sentChanges);
       }
-      if (connection.driverMessages && connection.companyId !== void 0) {
-        try {
-          const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses: statusesAfterSend ?? snapshot.statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
-          if (result.messages > 0)
-            this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
-        } catch (error) {
-          this.notes.push(`avisos de fila n\xE3o enviados: ${safeErrorMessage(error)}`);
-        }
-      }
+      if (statusesAfterSend)
+        await this.notifyDriverQueues(connection, cycleId, snapshot, statusesAfterSend);
       if (this.deferred)
         this.notes.push("Tempo do ciclo esgotado; ve\xEDculos restantes ser\xE3o retomados no pr\xF3ximo ciclo.");
       const outcome = this.deferred ? "partial" : "completed";
@@ -1144,6 +1175,34 @@ var NeonCycleRunner = class {
     this.service = service;
     this.connections = connections;
   }
+  // Conferência rápida das filas com aviso (entre passadas), sob o mesmo lease das passadas.
+  async runQuickQueueCheck() {
+    if (this.running || !this.connections.some((connection) => connection.driverMessages))
+      return;
+    this.running = true;
+    const owner = randomUUID2();
+    let acquired = false;
+    try {
+      acquired = await this.repository.acquireCycleLease(owner);
+      if (!acquired)
+        return;
+      const statusesCache = /* @__PURE__ */ new Map();
+      for (const connection of this.connections.filter((connection2) => connection2.driverMessages)) {
+        try {
+          await this.service.refreshDriverMessages(connection, statusesCache);
+        } catch (error) {
+          console.error(`Confer\xEAncia r\xE1pida de filas ${connection.id} falhou: ${error instanceof Error ? error.message : "erro"}`);
+        }
+      }
+    } finally {
+      try {
+        if (acquired)
+          await this.repository.releaseCycleLease(owner);
+      } finally {
+        this.running = false;
+      }
+    }
+  }
   async runOnce() {
     if (this.running)
       throw new CycleAlreadyRunningError("Ciclo j\xE1 em andamento");
@@ -1165,8 +1224,9 @@ var NeonCycleRunner = class {
       let completedConnections = 0;
       const nextConnectionIndex = await this.repository.getVehicleCursor(":connection-cursor");
       const startIndex = Math.max(0, nextConnectionIndex) % Math.max(1, this.connections.length);
-      for (let offset = 0; offset < this.connections.length; offset++) {
-        const connectionIndex = (startIndex + offset) % this.connections.length;
+      const order = this.connections.map((_, offset) => (startIndex + offset) % this.connections.length).sort((left, right) => Number(Boolean(this.connections[right].driverMessages)) - Number(Boolean(this.connections[left].driverMessages)));
+      for (let offset = 0; offset < order.length; offset++) {
+        const connectionIndex = order[offset];
         const connection = this.connections[connectionIndex];
         if (Date.now() > deadline - 15e3)
           break;
@@ -1330,18 +1390,30 @@ function logBackendError(context, error) {
   const errorCode = error && typeof error === "object" && "code" in error ? ` (${String(error.code)})` : "";
   console.error(`${context}: ${error instanceof Error ? error.name : "erro"}${errorCode}`);
 }
-async function runCronPasses(runtime) {
+async function runCronPasses(runtime, windowMs = CRON_PASS_WINDOW_MS) {
   const startedAt = Date.now();
   const repeatIntervalMs = readCronRepeatIntervalMs();
+  const pollIntervalMs = runtime.connections.some((connection) => connection.driverMessages) ? readQueuePollIntervalMs() : 0;
+  const windowEnd = startedAt + windowMs;
+  async function waitWithQueueChecks(until) {
+    while (Date.now() < until) {
+      const nextCheck = pollIntervalMs > 0 ? Math.min(until, Date.now() + pollIntervalMs) : until;
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, nextCheck - Date.now())));
+      if (pollIntervalMs > 0 && Date.now() < windowEnd)
+        await runtime.runner.runQuickQueueCheck();
+    }
+  }
   let lastPassMs = 0;
   try {
-    for (let pass = 0; pass === 0 || repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() - startedAt + repeatIntervalMs + lastPassMs < CRON_PASS_WINDOW_MS; pass++) {
+    for (let pass = 0; pass === 0 || repeatIntervalMs > 0 && runtime.runner.lastRunCompleted && Date.now() + repeatIntervalMs + lastPassMs < windowEnd; pass++) {
       if (pass > 0)
-        await new Promise((resolve) => setTimeout(resolve, repeatIntervalMs));
+        await waitWithQueueChecks(Date.now() + repeatIntervalMs);
       const passStartedAt = Date.now();
       await runtime.runner.runOnce();
       lastPassMs = Date.now() - passStartedAt;
     }
+    if (pollIntervalMs > 0)
+      await waitWithQueueChecks(windowEnd - pollIntervalMs);
   } catch (error) {
     if (error instanceof CycleAlreadyRunningError)
       console.log("Cron pulado: ciclo anterior ainda em andamento.");

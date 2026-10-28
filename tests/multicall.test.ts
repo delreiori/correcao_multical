@@ -286,3 +286,33 @@ test('modo demo aplica as mudanças na frota fictícia em vez de ignorá-las', a
     assert.ok(changes.every(change => change.outcome === 'confirmed'));
     repository.close();
 });
+test('avisos de zonas diferentes saem juntos, sem uma zona esperar a outra', async () => {
+    const gateway = new DemoAutocabClient();
+    let swapped = false;
+    gateway.listZones = async () => [{ id: 11, name: 'Praia', companyId: 1 }, { id: 12, name: 'Centro', companyId: 1 }];
+    gateway.listVehicles = async () => [501, 502, 601, 602].map(id => ({ id, callsign: 'V' + id, companyId: 1 }));
+    gateway.listVehicleStatuses = async () => [
+        { vehicleId: swapped ? 502 : 501, zoneId: 11, queuePosition: 1, status: 'Available', hasPenalty: false },
+        { vehicleId: swapped ? 501 : 502, zoneId: 11, queuePosition: 2, status: 'Available', hasPenalty: false },
+        { vehicleId: swapped ? 602 : 601, zoneId: 12, queuePosition: 1, status: 'Available', hasPenalty: false },
+        { vehicleId: swapped ? 601 : 602, zoneId: 12, queuePosition: 2, status: 'Available', hasPenalty: false },
+    ];
+    gateway.listGpsPositions = async () => [];
+    let inFlight = 0, maxInFlight = 0;
+    gateway.sendDriverMessage = async () => { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); await new Promise(resolve => setTimeout(resolve, 20)); inFlight--; return 200; };
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'dry', 'live');
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway };
+    await service.runConnection(connection);
+    swapped = true;
+    await service.runConnection(connection);
+    assert.equal(maxInFlight, 4);
+    assert.equal((repository.getDashboard().messages ?? []).length, 4);
+    repository.close();
+});
+test('intervalo da conferência rápida de filas usa 5 s por padrão e aceita 0', async () => {
+    const { readQueuePollIntervalMs } = await import('../server/execution-limits.ts');
+    assert.equal(readQueuePollIntervalMs(undefined), 5000);
+    assert.equal(readQueuePollIntervalMs('0'), 0);
+    assert.equal(readQueuePollIntervalMs('x'), 5000);
+});

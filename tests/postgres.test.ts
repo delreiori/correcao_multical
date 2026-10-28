@@ -259,3 +259,80 @@ test('DATABASE_URL colada com colchetes, aspas ou senha com caracteres especiais
     assert.throws(() => parseDatabaseUrl(`postgresql://postgres.abc123:[YOUR-PASSWORD]@${host}/postgres`), /YOUR-PASSWORD/);
     assert.throws(() => parseDatabaseUrl('https://exemplo.com'), error => error instanceof Error && /formato/.test(error.message) && !error.message.includes('exemplo'));
 });
+// Fila da Arcoverde (zona 11) com GPS lento e uma segunda empresa para conferir a ordem e a velocidade.
+function createArcoverdeFleet() {
+    const gateway = new DemoAutocabClient();
+    let order = [301, 302, 303];
+    const events: string[] = [];
+    gateway.listZones = async () => [{ id: 11, name: 'Praia', companyId: 1 }, { id: 21, name: 'Centro', companyId: 2 }];
+    gateway.listVehicles = async () => [...[301, 302, 303].map(id => ({ id, callsign: 'A' + id, companyId: 1 })), { id: 401, callsign: 'S401', companyId: 2 }];
+    gateway.listVehicleStatuses = async () => [...order.map((vehicleId, index) => ({ vehicleId, zoneId: 11, queuePosition: index + 1, status: 'Available', hasPenalty: false })), { vehicleId: 401, zoneId: 21, queuePosition: 1, status: 'Available', hasPenalty: false }];
+    gateway.listGpsPositions = async () => [301, 302, 303, 401].map(vehicleId => ({ vehicleId, latitude: -22.9, longitude: -43.2 }));
+    gateway.findZoneByCoordinates = async (_latitude: number, _longitude: number, companyId?: number) => { events.push('gps:' + companyId); return null; };
+    const sendDriverMessage = gateway.sendDriverMessage.bind(gateway);
+    gateway.sendDriverMessage = async (vehicleId: number, message: string) => { events.push('aviso:' + vehicleId); return sendDriverMessage(vehicleId, message); };
+    return { gateway, events, setOrder: (next: number[]) => { order = next; } };
+}
+test('aviso da Arcoverde sai antes da correção por GPS e a Arcoverde roda antes das outras empresas', async () => {
+    const { database, repository } = await createDatabase();
+    try {
+        const { gateway, events, setOrder } = createArcoverdeFleet();
+        const service = new CorrectionService(repository, rules, 'dry', 'live');
+        const connections = [{ id: 'sao-conrado', name: 'São Conrado', companyId: 2, gateway }, { id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway }];
+        const runner = new NeonCycleRunner(repository, service, connections);
+        await runner.runOnce();
+        setOrder([302, 301, 303]);
+        events.length = 0;
+        await runner.runOnce();
+        assert.deepEqual(events.slice(0, 2).sort(), ['aviso:301', 'aviso:302']);
+        assert.ok(events.indexOf('gps:2') > events.indexOf('gps:1'), 'Arcoverde corrige antes da São Conrado');
+    } finally { await database.close(); }
+});
+test('conferência rápida entre passadas avisa sem refazer a correção', async () => {
+    const { database, repository } = await createDatabase();
+    try {
+        const { gateway, events, setOrder } = createArcoverdeFleet();
+        const service = new CorrectionService(repository, rules, 'dry', 'live');
+        const runner = new NeonCycleRunner(repository, service, [{ id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway }]);
+        await runner.runQuickQueueCheck();
+        assert.equal(gateway.sentMessages.length, 0, 'sem passada anterior não há zonas para conferir');
+        await runner.runOnce();
+        const cycles = (await repository.getDashboard()).cycles.length;
+        setOrder([303, 301, 302]);
+        events.length = 0;
+        await runner.runQuickQueueCheck();
+        assert.deepEqual(gateway.sentMessages.map(message => message.vehicleId).sort(), [301, 302, 303]);
+        assert.ok(!events.some(event => event.startsWith('gps')), 'não consulta GPS');
+        assert.equal((await repository.getDashboard()).cycles.length, cycles, 'não abre ciclo novo');
+        await runner.runQuickQueueCheck();
+        assert.equal(gateway.sentMessages.length, 3, 'fila igual não repete');
+        // Outra execução com o lease: a conferência é pulada.
+        await repository.acquireCycleLease('outra');
+        setOrder([301, 302, 303]);
+        await runner.runQuickQueueCheck();
+        assert.equal(gateway.sentMessages.length, 3);
+    } finally { await database.close(); }
+});
+test('cron confere as filas a cada poucos segundos entre as passadas completas', async () => {
+    const { runCronPasses } = await import('../server/serverless-handler.ts');
+    const previous = { repeat: process.env.CRON_REPEAT_INTERVAL_MS, poll: process.env.DRIVER_MESSAGES_POLL_MS };
+    process.env.CRON_REPEAT_INTERVAL_MS = '400';
+    process.env.DRIVER_MESSAGES_POLL_MS = '100';
+    const calls: string[] = [];
+    const runner = { lastRunCompleted: true, async runOnce() { calls.push('passada'); }, async runQuickQueueCheck() { calls.push('fila'); } };
+    try {
+        const startedAt = Date.now();
+        await runCronPasses({ runner, connections: [{ id: 'arcoverde', name: 'Arcoverde', driverMessages: true, gateway: null }] } as never, 1000);
+        assert.ok(Date.now() - startedAt <= 1100, 'termina dentro da janela');
+        assert.ok(calls.filter(call => call === 'passada').length >= 2);
+        assert.ok(calls.filter(call => call === 'fila').length >= 5, `conferências rápidas: ${calls.join(',')}`);
+        calls.length = 0;
+        await runCronPasses({ runner, connections: [{ id: 'sao-conrado', name: 'São Conrado', gateway: null }] } as never, 1000);
+        assert.ok(!calls.includes('fila'), 'sem empresa com aviso não confere filas');
+    } finally {
+        for (const [name, value] of [['CRON_REPEAT_INTERVAL_MS', previous.repeat], ['DRIVER_MESSAGES_POLL_MS', previous.poll]] as const) {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+        }
+    }
+});
