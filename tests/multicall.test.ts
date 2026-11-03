@@ -310,9 +310,11 @@ test('avisos de zonas diferentes saem juntos, sem uma zona esperar a outra', asy
     assert.equal((repository.getDashboard().messages ?? []).length, 4);
     repository.close();
 });
-test('intervalo da conferência rápida de filas usa 5 s por padrão e aceita 0', async () => {
-    const { readQueuePollIntervalMs } = await import('../server/execution-limits.ts');
-    assert.equal(readQueuePollIntervalMs(undefined), 5000);
+test('conferência de fila usa 2 s e passada rápida 5 s por padrão; ambas aceitam 0', async () => {
+    const { readQueuePollIntervalMs, readFastPassIntervalMs } = await import('../server/execution-limits.ts');
+    assert.equal(readQueuePollIntervalMs(undefined), 2000);
     assert.equal(readQueuePollIntervalMs('0'), 0);
-    assert.equal(readQueuePollIntervalMs('x'), 5000);
+    assert.equal(readQueuePollIntervalMs('x'), 2000);
+    assert.equal(readFastPassIntervalMs(undefined), 5000);
+    assert.equal(readFastPassIntervalMs('0'), 0);
 });

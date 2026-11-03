@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { createNeonRuntime, CycleAlreadyRunningError } from './neon-runtime.ts';
 import { listCompaniesForConnections } from './companies.ts';
-import { CRON_PASS_WINDOW_MS, readCronRepeatIntervalMs, readQueuePollIntervalMs } from './execution-limits.ts';
+import { CRON_CHECK_WINDOW_MS, CRON_PASS_WINDOW_MS, readCronRepeatIntervalMs, readFastPassIntervalMs, readQueuePollIntervalMs } from './execution-limits.ts';
 import { waitUntil } from '@vercel/functions';
 export type NeonRuntime = Awaited<ReturnType<typeof createNeonRuntime>>;
 function hasBearerToken(request: IncomingMessage, token: string) {
@@ -35,20 +35,31 @@ function logBackendError(context: string, error: unknown) {
 }
 // Passadas do cron: a primeira e, enquanto couberem antes do próximo disparo, passadas extras a cada
 // CRON_REPEAT_INTERVAL_MS. Nunca rejeita; o resultado fica no histórico de ciclos e no log.
-export async function runCronPasses(runtime: Pick<NeonRuntime, 'runner' | 'connections'>, windowMs = CRON_PASS_WINDOW_MS) {
+export async function runCronPasses(runtime: Pick<NeonRuntime, 'runner' | 'connections'>, windowMs = CRON_PASS_WINDOW_MS, checkWindowMs = windowMs === CRON_PASS_WINDOW_MS ? CRON_CHECK_WINDOW_MS : windowMs) {
     const startedAt = Date.now();
     const repeatIntervalMs = readCronRepeatIntervalMs();
-    // Passadas rápidas entre as completas só para empresas com aviso aos motoristas (Arcoverde).
-    const pollIntervalMs = runtime.connections.some(connection => connection.driverMessages) ? readQueuePollIntervalMs() : 0;
+    // Entre as passadas completas, só para empresas com aviso aos motoristas (Arcoverde): conferência
+    // de fila a cada queueCheckMs e, a cada fastPassMs, passada rápida que também reposiciona.
+    const hasPriority = runtime.connections.some(connection => connection.driverMessages);
+    const fastPassMs = hasPriority ? readFastPassIntervalMs() : 0;
+    const queueCheckMs = hasPriority ? readQueuePollIntervalMs() : 0;
+    const tickMs = Math.min(...[fastPassMs, queueCheckMs].filter(interval => interval > 0), Infinity);
     const windowEnd = startedAt + windowMs;
-    // Espera até o horário indicado; nesse meio tempo faz a passada rápida da Arcoverde a cada
-    // pollIntervalMs (reposiciona e avisa), sem esperar a próxima passada completa.
+    const checkWindowEnd = startedAt + checkWindowMs;
+    let lastFastPassAt = Date.now();
     async function waitWithQueueChecks(until: number) {
         while (Date.now() < until) {
-            const nextCheck = pollIntervalMs > 0 ? Math.min(until, Date.now() + pollIntervalMs) : until;
+            const nextCheck = Number.isFinite(tickMs) ? Math.min(until, Date.now() + tickMs) : until;
             await new Promise(resolve => setTimeout(resolve, Math.max(0, nextCheck - Date.now())));
-            if (pollIntervalMs > 0 && Date.now() < windowEnd)
+            if (!Number.isFinite(tickMs) || Date.now() >= checkWindowEnd)
+                continue;
+            // A passada rápida (mais pesada) só começa enquanto cabe antes do próximo disparo.
+            if (fastPassMs > 0 && Date.now() - lastFastPassAt >= fastPassMs && Date.now() < windowEnd) {
+                lastFastPassAt = Date.now();
                 await runtime.runner.runPriorityPass();
+            }
+            else if (queueCheckMs > 0)
+                await runtime.runner.runQueueCheck();
         }
     }
     let lastPassMs = 0;
@@ -59,10 +70,11 @@ export async function runCronPasses(runtime: Pick<NeonRuntime, 'runner' | 'conne
             const passStartedAt = Date.now();
             await runtime.runner.runOnce();
             lastPassMs = Date.now() - passStartedAt;
+            lastFastPassAt = Date.now();
         }
-        // Sem tempo para outra passada completa: segue só com as passadas rápidas até o fim da janela.
-        if (pollIntervalMs > 0)
-            await waitWithQueueChecks(windowEnd - pollIntervalMs);
+        // Sem tempo para outra passada completa: segue com as conferências até perto do próximo disparo.
+        if (Number.isFinite(tickMs))
+            await waitWithQueueChecks(checkWindowEnd - tickMs);
     }
     catch (error) {
         // Execução anterior (ou de outro disparo) ainda ativa: este disparo só é pulado.

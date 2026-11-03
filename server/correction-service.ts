@@ -227,6 +227,21 @@ export class CorrectionService {
             this.notes.push(`avisos de fila não enviados: ${safeErrorMessage(error)}`);
         }
     }
+    // Conferência só de fila: relê os status (uma chamada) e avisa as filas que mudaram, sem corrigir.
+    // Usa zonas e veículos da última leitura (até 2 minutos); sem ela, não faz nada.
+    async refreshDriverMessages(connection: CorrectionConnection, statusesCache: Map<AutocabGateway, Promise<VehicleStatus[]>>): Promise<number> {
+        const fleet = this.lastFleets.get(connection.id);
+        if (!connection.driverMessages || !connection.gateway || !fleet || fleet.companyId === undefined || this.driverMessagesMode === 'off' || Date.now() - fleet.at > 2 * FLEET_CACHE_TTL_MS)
+            return 0;
+        const gateway = connection.gateway;
+        let statusesPromise = statusesCache.get(gateway);
+        if (!statusesPromise) {
+            statusesPromise = gateway.listVehicleStatuses();
+            statusesCache.set(gateway, statusesPromise);
+        }
+        const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${new Date().toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter(vehicle => vehicle.companyId === fleet.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+        return result.messages;
+    }
     async runConnection(connection: CorrectionConnection, options: {
         deadline?: number;
         snapshotCache?: Map<AutocabGateway, Promise<FleetSnapshot>>;

@@ -24,6 +24,38 @@ export class NeonCycleRunner implements CycleRuntime {
     lastRunCompleted = false;
     private lastPruneAt = 0;
     constructor(repository: PostgresAuditRepository, service: CorrectionService, connections: CorrectionConnection[]) { this.repository = repository; this.service = service; this.connections = connections; }
+    // Conferência só de fila das empresas com aviso, sob o mesmo lease das passadas.
+    async runQueueCheck() {
+        const priorityConnections = this.connections.filter(connection => connection.driverMessages);
+        if (this.running || priorityConnections.length === 0)
+            return;
+        this.running = true;
+        const owner = randomUUID();
+        let acquired = false;
+        try {
+            acquired = await this.repository.acquireCycleLease(owner);
+            if (!acquired)
+                return;
+            const statusesCache = new Map();
+            for (const connection of priorityConnections) {
+                try {
+                    await this.service.refreshDriverMessages(connection, statusesCache);
+                }
+                catch (error) {
+                    console.error(`Conferência de fila ${connection.id} falhou: ${error instanceof Error ? error.message : 'erro'}`);
+                }
+            }
+        }
+        finally {
+            try {
+                if (acquired)
+                    await this.repository.releaseCycleLease(owner);
+            }
+            finally {
+                this.running = false;
+            }
+        }
+    }
     // Passada rápida da Arcoverde entre as completas (reposiciona e avisa), sob o mesmo lease.
     async runPriorityPass() {
         const priorityConnections = this.connections.filter(connection => connection.driverMessages);

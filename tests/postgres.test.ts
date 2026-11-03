@@ -345,24 +345,43 @@ test('passada rápida corrige a zona do carro que se moveu', async () => {
 });
 test('cron confere as filas a cada poucos segundos entre as passadas completas', async () => {
     const { runCronPasses } = await import('../server/serverless-handler.ts');
-    const previous = { repeat: process.env.CRON_REPEAT_INTERVAL_MS, poll: process.env.DRIVER_MESSAGES_POLL_MS };
-    process.env.CRON_REPEAT_INTERVAL_MS = '400';
-    process.env.DRIVER_MESSAGES_POLL_MS = '100';
+    const names = ['CRON_REPEAT_INTERVAL_MS', 'DRIVER_MESSAGES_POLL_MS', 'FAST_PASS_INTERVAL_MS'] as const;
+    const previous = names.map(name => process.env[name]);
+    process.env.CRON_REPEAT_INTERVAL_MS = '600';
+    process.env.DRIVER_MESSAGES_POLL_MS = '50';
+    process.env.FAST_PASS_INTERVAL_MS = '200';
     const calls: string[] = [];
-    const runner = { lastRunCompleted: true, async runOnce() { calls.push('passada'); }, async runPriorityPass() { calls.push('fila'); } };
+    const runner = { lastRunCompleted: true, async runOnce() { calls.push('passada'); }, async runPriorityPass() { calls.push('rapida'); }, async runQueueCheck() { calls.push('fila'); } };
     try {
         const startedAt = Date.now();
-        await runCronPasses({ runner, connections: [{ id: 'arcoverde', name: 'Arcoverde', driverMessages: true, gateway: null }] } as never, 1000);
-        assert.ok(Date.now() - startedAt <= 1100, 'termina dentro da janela');
-        assert.ok(calls.filter(call => call === 'passada').length >= 2);
-        assert.ok(calls.filter(call => call === 'fila').length >= 5, `conferências rápidas: ${calls.join(',')}`);
+        await runCronPasses({ runner, connections: [{ id: 'arcoverde', name: 'Arcoverde', driverMessages: true, gateway: null }] } as never, 1000, 1400);
+        assert.ok(Date.now() - startedAt <= 1500, 'termina dentro da janela das conferências');
+        const count = (name: string) => calls.filter(call => call === name).length;
+        assert.ok(count('passada') >= 2, calls.join(','));
+        assert.ok(count('rapida') >= 2, calls.join(','));
+        assert.ok(count('fila') >= 10, calls.join(','));
         calls.length = 0;
         await runCronPasses({ runner, connections: [{ id: 'sao-conrado', name: 'São Conrado', gateway: null }] } as never, 1000);
-        assert.ok(!calls.includes('fila'), 'sem empresa com aviso não confere filas');
+        assert.deepEqual([...new Set(calls)], ['passada'], 'sem empresa com aviso só faz as passadas completas');
     } finally {
-        for (const [name, value] of [['CRON_REPEAT_INTERVAL_MS', previous.repeat], ['DRIVER_MESSAGES_POLL_MS', previous.poll]] as const) {
-            if (value === undefined) delete process.env[name];
-            else process.env[name] = value;
-        }
+        names.forEach((name, index) => { if (previous[index] === undefined) delete process.env[name]; else process.env[name] = previous[index]; });
     }
+});
+test('conferência de fila avisa com uma leitura de status, sem GPS e sem ciclo', async () => {
+    const { database, repository } = await createDatabase();
+    try {
+        const { gateway, events, setOrder } = createArcoverdeFleet();
+        const service = new CorrectionService(repository, rules, 'dry', 'live');
+        const runner = new NeonCycleRunner(repository, service, [{ id: 'arcoverde', name: 'Arcoverde', companyId: 1, driverMessages: true, gateway }]);
+        await runner.runQueueCheck();
+        assert.equal(gateway.sentMessages.length, 0, 'sem leitura anterior não confere');
+        await runner.runOnce();
+        const cycles = (await repository.getDashboard()).cycles.length;
+        setOrder([302, 303, 301]);
+        events.length = 0;
+        await runner.runQueueCheck();
+        assert.deepEqual(gateway.sentMessages.map(message => message.vehicleId).sort(), [301, 302, 303]);
+        assert.ok(!events.some(event => event.startsWith('gps')));
+        assert.equal((await repository.getDashboard()).cycles.length, cycles);
+    } finally { await database.close(); }
 });

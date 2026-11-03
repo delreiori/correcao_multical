@@ -95,9 +95,16 @@ function readCronRepeatIntervalMs(value = process.env.CRON_REPEAT_INTERVAL_MS) {
   const interval = Number(value ?? 2e4);
   return Number.isFinite(interval) && interval >= 0 ? interval : 2e4;
 }
-function readQueuePollIntervalMs(value = process.env.FAST_PASS_INTERVAL_MS ?? process.env.DRIVER_MESSAGES_POLL_MS) {
-  const interval = Number(value ?? 5e3);
-  return Number.isFinite(interval) && interval >= 0 ? interval : 5e3;
+var CRON_CHECK_WINDOW_MS = 56e3;
+function readInterval(value, fallback) {
+  const interval = Number(value ?? fallback);
+  return Number.isFinite(interval) && interval >= 0 ? interval : fallback;
+}
+function readFastPassIntervalMs(value = process.env.FAST_PASS_INTERVAL_MS) {
+  return readInterval(value, 5e3);
+}
+function readQueuePollIntervalMs(value = process.env.DRIVER_MESSAGES_POLL_MS) {
+  return readInterval(value, 2e3);
 }
 
 // server/neon-runtime.ts
@@ -1091,6 +1098,21 @@ var CorrectionService = class {
       this.notes.push(`avisos de fila n\xE3o enviados: ${safeErrorMessage(error)}`);
     }
   }
+  // Conferência só de fila: relê os status (uma chamada) e avisa as filas que mudaram, sem corrigir.
+  // Usa zonas e veículos da última leitura (até 2 minutos); sem ela, não faz nada.
+  async refreshDriverMessages(connection, statusesCache) {
+    const fleet = this.lastFleets.get(connection.id);
+    if (!connection.driverMessages || !connection.gateway || !fleet || fleet.companyId === void 0 || this.driverMessagesMode === "off" || Date.now() - fleet.at > 2 * FLEET_CACHE_TTL_MS)
+      return 0;
+    const gateway = connection.gateway;
+    let statusesPromise = statusesCache.get(gateway);
+    if (!statusesPromise) {
+      statusesPromise = gateway.listVehicleStatuses();
+      statusesCache.set(gateway, statusesPromise);
+    }
+    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${(/* @__PURE__ */ new Date()).toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter((vehicle) => vehicle.companyId === fleet.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+    return result.messages;
+  }
   async runConnection(connection, options = {}) {
     this.deadline = options.deadline ?? Infinity;
     this.deferred = false;
@@ -1197,6 +1219,35 @@ var NeonCycleRunner = class {
     this.repository = repository;
     this.service = service;
     this.connections = connections;
+  }
+  // Conferência só de fila das empresas com aviso, sob o mesmo lease das passadas.
+  async runQueueCheck() {
+    const priorityConnections = this.connections.filter((connection) => connection.driverMessages);
+    if (this.running || priorityConnections.length === 0)
+      return;
+    this.running = true;
+    const owner = randomUUID2();
+    let acquired = false;
+    try {
+      acquired = await this.repository.acquireCycleLease(owner);
+      if (!acquired)
+        return;
+      const statusesCache = /* @__PURE__ */ new Map();
+      for (const connection of priorityConnections) {
+        try {
+          await this.service.refreshDriverMessages(connection, statusesCache);
+        } catch (error) {
+          console.error(`Confer\xEAncia de fila ${connection.id} falhou: ${error instanceof Error ? error.message : "erro"}`);
+        }
+      }
+    } finally {
+      try {
+        if (acquired)
+          await this.repository.releaseCycleLease(owner);
+      } finally {
+        this.running = false;
+      }
+    }
   }
   // Passada rápida da Arcoverde entre as completas (reposiciona e avisa), sob o mesmo lease.
   async runPriorityPass() {
@@ -1409,17 +1460,27 @@ function logBackendError(context, error) {
   const errorCode = error && typeof error === "object" && "code" in error ? ` (${String(error.code)})` : "";
   console.error(`${context}: ${error instanceof Error ? error.name : "erro"}${errorCode}`);
 }
-async function runCronPasses(runtime, windowMs = CRON_PASS_WINDOW_MS) {
+async function runCronPasses(runtime, windowMs = CRON_PASS_WINDOW_MS, checkWindowMs = windowMs === CRON_PASS_WINDOW_MS ? CRON_CHECK_WINDOW_MS : windowMs) {
   const startedAt = Date.now();
   const repeatIntervalMs = readCronRepeatIntervalMs();
-  const pollIntervalMs = runtime.connections.some((connection) => connection.driverMessages) ? readQueuePollIntervalMs() : 0;
+  const hasPriority = runtime.connections.some((connection) => connection.driverMessages);
+  const fastPassMs = hasPriority ? readFastPassIntervalMs() : 0;
+  const queueCheckMs = hasPriority ? readQueuePollIntervalMs() : 0;
+  const tickMs = Math.min(...[fastPassMs, queueCheckMs].filter((interval) => interval > 0), Infinity);
   const windowEnd = startedAt + windowMs;
+  const checkWindowEnd = startedAt + checkWindowMs;
+  let lastFastPassAt = Date.now();
   async function waitWithQueueChecks(until) {
     while (Date.now() < until) {
-      const nextCheck = pollIntervalMs > 0 ? Math.min(until, Date.now() + pollIntervalMs) : until;
+      const nextCheck = Number.isFinite(tickMs) ? Math.min(until, Date.now() + tickMs) : until;
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, nextCheck - Date.now())));
-      if (pollIntervalMs > 0 && Date.now() < windowEnd)
+      if (!Number.isFinite(tickMs) || Date.now() >= checkWindowEnd)
+        continue;
+      if (fastPassMs > 0 && Date.now() - lastFastPassAt >= fastPassMs && Date.now() < windowEnd) {
+        lastFastPassAt = Date.now();
         await runtime.runner.runPriorityPass();
+      } else if (queueCheckMs > 0)
+        await runtime.runner.runQueueCheck();
     }
   }
   let lastPassMs = 0;
@@ -1430,9 +1491,10 @@ async function runCronPasses(runtime, windowMs = CRON_PASS_WINDOW_MS) {
       const passStartedAt = Date.now();
       await runtime.runner.runOnce();
       lastPassMs = Date.now() - passStartedAt;
+      lastFastPassAt = Date.now();
     }
-    if (pollIntervalMs > 0)
-      await waitWithQueueChecks(windowEnd - pollIntervalMs);
+    if (Number.isFinite(tickMs))
+      await waitWithQueueChecks(checkWindowEnd - tickMs);
   } catch (error) {
     if (error instanceof CycleAlreadyRunningError)
       console.log("Cron pulado: ciclo anterior ainda em andamento.");
