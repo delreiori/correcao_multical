@@ -558,8 +558,36 @@ test('carro em zona da Arcoverde com cadastro sem empresa ou de outra empresa ta
         return 200;
     };
     const repository = new AuditRepository(':memory:');
-    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, allNotFreeToOutside: true, gateway });
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, allNotFreeToOutside: true, callsignPrefixes: ['5'], gateway });
     assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[16, 13], [28, 13], [99, 21]], 'carro em zona de outra empresa não é mexido');
-    assert.match(repository.getDashboard().cycles[0].detail ?? '', /incluídos por estarem em zona da empresa: 5016 \(sem empresa\), 5028 \(empresa 9\)/);
+    assert.match(repository.getDashboard().cycles[0].detail ?? '', /incluídos pelo prefixo ou por estarem em zona da empresa: 5016 \(prefixo, sem empresa\), 5028 \(prefixo, empresa 9\)/);
+    repository.close();
+});
+test('Arcoverde pega todo carro com prefixo 5, onde estiver cadastrado; as outras empresas deixam esses carros de lado', async () => {
+    const connections = readConfiguration().connections;
+    const arcoverde = connections.find(connection => connection.id === 'arcoverde')!;
+    const saoConrado = connections.find(connection => connection.id === 'sao-conrado')!;
+    assert.deepEqual(arcoverde.callsignPrefixes, ['5']);
+    assert.deepEqual(saoConrado.excludeCallsignPrefixes, ['5']);
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 36, zoneId: 21, queuePosition: 1, status: 'BusyMeterOff', hasPenalty: false },
+        { vehicleId: 61, zoneId: 21, queuePosition: 2, status: 'BusyMeterOff', hasPenalty: false },
+    ];
+    // 5036 cadastrado na São Conrado (2), numa zona compartilhada; 6001 é da São Conrado.
+    gateway.listZones = async () => [{ id: 21, name: 'GAVEA', companyId: null as unknown as number }, { id: 13, name: 'FORA D AREA', companyId: 1 }, { id: 23, name: 'FORA DE AREA', companyId: 2 }];
+    gateway.listVehicles = async () => [{ id: 36, callsign: '5036', companyId: 2 }, { id: 61, callsign: '6001', companyId: 2 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [];
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item);
+        return 200;
+    };
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, readConfiguration(), 'live');
+    await service.runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 2, excludeCallsignPrefixes: saoConrado.excludeCallsignPrefixes, gateway });
+    assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[36, 21], [61, 23]], 'São Conrado não mexe no 5036');
+    await service.runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, allNotFreeToOutside: true, callsignPrefixes: arcoverde.callsignPrefixes, gateway });
+    assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[36, 13], [61, 23]], 'Arcoverde leva o 5036 para FORA D AREA');
     repository.close();
 });

@@ -242,7 +242,7 @@ export async function createNeonRuntime() {
     const connections: CorrectionConnection[] = configuration.connections.map(connection => {
         const key = process.env[connection.subscriptionKeyEnvironmentVariable];
         const gateway = configuration.mode === 'demo' ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
-        return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, allNotFreeToOutside: connection.allNotFreeToOutside, gateway };
+        return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, allNotFreeToOutside: connection.allNotFreeToOutside, callsignPrefixes: connection.callsignPrefixes, excludeCallsignPrefixes: connection.excludeCallsignPrefixes, gateway };
     });
     const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
     const runner = new NeonCycleRunner(repository, service, connections);

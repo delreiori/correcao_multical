@@ -142,7 +142,7 @@ import { readFileSync } from "node:fs";
 var MULTICALL_COMPANIES = [
   // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
   // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, allNotFreeToOutside: true },
+  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ["5"] },
   { id: "sao-conrado", name: "S\xE3o Conrado", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_SAO_CONRADO" },
   { id: "pedra-da-gavea", name: "Pedra da G\xE1vea", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA" }
 ];
@@ -163,12 +163,12 @@ function readPositiveInteger(value, fallback) {
 }
 function readConnections() {
   if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: "allNotFreeToOutside" in company && company.allNotFreeToOutside === true ? true : void 0 }));
+    return withPrefixExclusions(MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: "allNotFreeToOutside" in company && company.allNotFreeToOutside === true ? true : void 0, callsignPrefixes: "callsignPrefixes" in company ? company.callsignPrefixes : void 0 })));
   const connectionList = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, "utf8"));
   if (!Array.isArray(connectionList) || connectionList.length === 0)
     throw new Error("Lista de conex\xF5es vazia ou inv\xE1lida");
   const identifiers = /* @__PURE__ */ new Set();
-  return connectionList.map((entry) => {
+  return withPrefixExclusions(connectionList.map((entry) => {
     if (typeof entry !== "object" || entry === null)
       throw new Error("Conex\xE3o inv\xE1lida");
     const connection = entry;
@@ -188,8 +188,16 @@ function readConnections() {
       throw new Error("busyFollowsGps deve ser true ou false");
     if (connection.allNotFreeToOutside !== void 0 && typeof connection.allNotFreeToOutside !== "boolean")
       throw new Error("allNotFreeToOutside deve ser true ou false");
+    if (connection.callsignPrefixes !== void 0 && (!Array.isArray(connection.callsignPrefixes) || connection.callsignPrefixes.some((prefix) => typeof prefix !== "string" || !prefix.trim())))
+      throw new Error("callsignPrefixes deve ser uma lista de prefixos");
     identifiers.add(connection.id);
     return connection;
+  }));
+}
+function withPrefixExclusions(connections) {
+  return connections.map((connection) => {
+    const excludeCallsignPrefixes = connections.filter((other) => other.id !== connection.id).flatMap((other) => other.callsignPrefixes ?? []);
+    return excludeCallsignPrefixes.length > 0 ? { ...connection, excludeCallsignPrefixes } : connection;
   });
 }
 function readDriverMessagesMode() {
@@ -972,6 +980,13 @@ var GPS_LOOKUP_CONCURRENCY = 16;
 var UNRESOLVED_BLOCK_MS = 12e4;
 var ZONE_LOOKUP_TTL_MS = 12e4;
 var FLEET_CACHE_TTL_MS = 6e4;
+function claimByCallsign(connection, vehicle) {
+  if (connection.callsignPrefixes?.some((prefix) => vehicle.callsign.startsWith(prefix)))
+    return "own";
+  if (connection.excludeCallsignPrefixes?.some((prefix) => vehicle.callsign.startsWith(prefix)))
+    return "other";
+  return "none";
+}
 function safeErrorMessage(error) {
   return error instanceof Error ? error.message : "Falha n\xE3o identificada na corre\xE7\xE3o";
 }
@@ -1064,8 +1079,15 @@ var CorrectionService = class {
       const withoutCompany = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId == null && !(status.zoneId !== null && ownZoneIds.has(status.zoneId))).length;
       statusesToInspect = statusesToInspect.filter((status) => {
         const vehicle = vehiclesById.get(status.vehicleId);
+        const claim = vehicle ? claimByCallsign(connection, vehicle) : "none";
+        if (claim === "other")
+          return false;
         if (vehicle?.companyId === connection.companyId)
           return true;
+        if (vehicle && claim === "own") {
+          byZone.push(`${vehicle.callsign} (prefixo, ${vehicle.companyId === null ? "sem empresa" : `empresa ${vehicle.companyId}`})`);
+          return true;
+        }
         if (vehicle && status.zoneId !== null && ownZoneIds.has(status.zoneId)) {
           byZone.push(`${vehicle.callsign} (${vehicle.companyId === null ? "sem empresa" : `empresa ${vehicle.companyId}`})`);
           return true;
@@ -1074,7 +1096,7 @@ var CorrectionService = class {
       });
       this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} ve\xEDculos da empresa de ${snapshot.statuses.length} retornados`);
       if (byZone.length > 0)
-        this.notes.push(`inclu\xEDdos por estarem em zona da empresa: ${byZone.slice(0, 15).join(", ")}${byZone.length > 15 ? ` e mais ${byZone.length - 15}` : ""}`);
+        this.notes.push(`inclu\xEDdos pelo prefixo ou por estarem em zona da empresa: ${byZone.slice(0, 15).join(", ")}${byZone.length > 15 ? ` e mais ${byZone.length - 15}` : ""}`);
       if (statusesToInspect.length > 0)
         this.notes.push(`status: ${summarizeStatuses(statusesToInspect, rules)}`);
       if (withoutCompany > 0)
@@ -1205,7 +1227,7 @@ var CorrectionService = class {
     if (!connection.driverMessages || connection.companyId === void 0 || !connection.gateway)
       return;
     try {
-      const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+      const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter((vehicle) => claimByCallsign(connection, vehicle) !== "other"), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
       this.messagesSent += result.messages;
       if (result.messages > 0)
         this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
@@ -1225,7 +1247,7 @@ var CorrectionService = class {
       statusesPromise = gateway.listVehicleStatuses();
       statusesCache.set(gateway, statusesPromise);
     }
-    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${(/* @__PURE__ */ new Date()).toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter((vehicle) => vehicle.companyId === fleet.companyId), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${(/* @__PURE__ */ new Date()).toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter((vehicle) => claimByCallsign(connection, vehicle) !== "other"), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
     return result.messages;
   }
   async runConnection(connection, options = {}) {
@@ -1525,7 +1547,7 @@ async function createNeonRuntime() {
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
-    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, allNotFreeToOutside: connection.allNotFreeToOutside, gateway };
+    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, allNotFreeToOutside: connection.allNotFreeToOutside, callsignPrefixes: connection.callsignPrefixes, excludeCallsignPrefixes: connection.excludeCallsignPrefixes, gateway };
   });
   const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
   const runner = new NeonCycleRunner(repository, service, connections);

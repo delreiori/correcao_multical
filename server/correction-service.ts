@@ -15,6 +15,8 @@ export interface CorrectionConnection {
     driverMessages?: boolean;
     busyFollowsGps?: boolean;
     allNotFreeToOutside?: boolean;
+    callsignPrefixes?: string[];
+    excludeCallsignPrefixes?: string[];
     gateway: AutocabGateway | null;
 }
 // Resolve o companyId pelo nome da empresa no GET de empresas. Nunca segue sem empresa definida:
@@ -43,6 +45,14 @@ const UNRESOLVED_BLOCK_MS = 120_000;
 const ZONE_LOOKUP_TTL_MS = 120_000;
 // Zonas e veículos quase não mudam: a passada rápida reaproveita a última leitura por até 1 minuto.
 const FLEET_CACHE_TTL_MS = 60_000;
+// Prefixo do callsign decide a empresa antes do companyId: 'own' (desta), 'other' (de outra), 'none'.
+function claimByCallsign(connection: CorrectionConnection, vehicle: Vehicle): 'own' | 'other' | 'none' {
+    if (connection.callsignPrefixes?.some(prefix => vehicle.callsign.startsWith(prefix)))
+        return 'own';
+    if (connection.excludeCallsignPrefixes?.some(prefix => vehicle.callsign.startsWith(prefix)))
+        return 'other';
+    return 'none';
+}
 function safeErrorMessage(error: unknown) { return error instanceof Error ? error.message : 'Falha não identificada na correção'; }
 export class CorrectionService {
     private repository: AuditStore;
@@ -130,8 +140,15 @@ export class CorrectionService {
             const withoutCompany = statusesToInspect.filter(status => vehiclesById.get(status.vehicleId)?.companyId == null && !(status.zoneId !== null && ownZoneIds.has(status.zoneId))).length;
             statusesToInspect = statusesToInspect.filter(status => {
                 const vehicle = vehiclesById.get(status.vehicleId);
+                const claim = vehicle ? claimByCallsign(connection, vehicle) : 'none';
+                if (claim === 'other')
+                    return false;
                 if (vehicle?.companyId === connection.companyId)
                     return true;
+                if (vehicle && claim === 'own') {
+                    byZone.push(`${vehicle.callsign} (prefixo, ${vehicle.companyId === null ? 'sem empresa' : `empresa ${vehicle.companyId}`})`);
+                    return true;
+                }
                 if (vehicle && status.zoneId !== null && ownZoneIds.has(status.zoneId)) {
                     byZone.push(`${vehicle.callsign} (${vehicle.companyId === null ? 'sem empresa' : `empresa ${vehicle.companyId}`})`);
                     return true;
@@ -140,7 +157,7 @@ export class CorrectionService {
             });
             this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} veículos da empresa de ${snapshot.statuses.length} retornados`);
             if (byZone.length > 0)
-                this.notes.push(`incluídos por estarem em zona da empresa: ${byZone.slice(0, 15).join(', ')}${byZone.length > 15 ? ` e mais ${byZone.length - 15}` : ''}`);
+                this.notes.push(`incluídos pelo prefixo ou por estarem em zona da empresa: ${byZone.slice(0, 15).join(', ')}${byZone.length > 15 ? ` e mais ${byZone.length - 15}` : ''}`);
             if (statusesToInspect.length > 0)
                 this.notes.push(`status: ${summarizeStatuses(statusesToInspect, rules)}`);
             if (withoutCompany > 0)
@@ -278,7 +295,7 @@ export class CorrectionService {
             return;
         // Falha no aviso não desfaz a correção; fica registrada no detalhe do ciclo.
         try {
-            const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter(vehicle => vehicle.companyId === connection.companyId), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+            const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter(vehicle => claimByCallsign(connection, vehicle) !== 'other'), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
             this.messagesSent += result.messages;
             if (result.messages > 0)
                 this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ''}`);
@@ -299,7 +316,7 @@ export class CorrectionService {
             statusesPromise = gateway.listVehicleStatuses();
             statusesCache.set(gateway, statusesPromise);
         }
-        const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${new Date().toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter(vehicle => vehicle.companyId === fleet.companyId), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+        const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${new Date().toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter(vehicle => claimByCallsign(connection, vehicle) !== 'other'), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
         return result.messages;
     }
     async runConnection(connection: CorrectionConnection, options: {

@@ -11,6 +11,10 @@ export interface ConnectionConfig {
     busyFollowsGps?: boolean;
     // Todo carro não livre vai para fora de área, menos NAK e sem GPS (Arcoverde).
     allNotFreeToOutside?: boolean;
+    // Carros cujo callsign começa com estes prefixos são desta empresa, qualquer que seja o companyId
+    // do cadastro (Arcoverde: "5"). As outras empresas deixam esses carros de lado.
+    callsignPrefixes?: string[];
+    excludeCallsignPrefixes?: string[];
 }
 export type DriverMessagesMode = 'off' | 'dry' | 'live';
 export interface AppConfig {
@@ -42,7 +46,7 @@ export interface AppConfig {
 export const MULTICALL_COMPANIES = [
     // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
     // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, allNotFreeToOutside: true },
+    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ['5'] },
     { id: 'sao-conrado', name: 'São Conrado', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_SAO_CONRADO' },
     { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA' },
 ];
@@ -63,12 +67,12 @@ function readPositiveInteger(value: string | undefined, fallback: number): numbe
 }
 function readConnections(): ConnectionConfig[] {
     if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: 'allNotFreeToOutside' in company && company.allNotFreeToOutside === true ? true : undefined }));
+        return withPrefixExclusions(MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: 'allNotFreeToOutside' in company && company.allNotFreeToOutside === true ? true : undefined, callsignPrefixes: 'callsignPrefixes' in company ? company.callsignPrefixes : undefined })));
     const connectionList: unknown = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, 'utf8'));
     if (!Array.isArray(connectionList) || connectionList.length === 0)
         throw new Error('Lista de conexões vazia ou inválida');
     const identifiers = new Set<string>();
-    return connectionList.map((entry: unknown) => {
+    return withPrefixExclusions(connectionList.map((entry: unknown) => {
         if (typeof entry !== 'object' || entry === null)
             throw new Error('Conexão inválida');
         const connection = entry as Record<string, unknown>;
@@ -88,8 +92,17 @@ function readConnections(): ConnectionConfig[] {
             throw new Error('busyFollowsGps deve ser true ou false');
         if (connection.allNotFreeToOutside !== undefined && typeof connection.allNotFreeToOutside !== 'boolean')
             throw new Error('allNotFreeToOutside deve ser true ou false');
+        if (connection.callsignPrefixes !== undefined && (!Array.isArray(connection.callsignPrefixes) || connection.callsignPrefixes.some(prefix => typeof prefix !== 'string' || !prefix.trim())))
+            throw new Error('callsignPrefixes deve ser uma lista de prefixos');
         identifiers.add(connection.id);
         return connection as unknown as ConnectionConfig;
+    }));
+}
+// Cada empresa deixa de lado os carros com prefixo de callsign de outra empresa.
+function withPrefixExclusions(connections: ConnectionConfig[]): ConnectionConfig[] {
+    return connections.map(connection => {
+        const excludeCallsignPrefixes = connections.filter(other => other.id !== connection.id).flatMap(other => other.callsignPrefixes ?? []);
+        return excludeCallsignPrefixes.length > 0 ? { ...connection, excludeCallsignPrefixes } : connection;
     });
 }
 function readDriverMessagesMode(): DriverMessagesMode {
