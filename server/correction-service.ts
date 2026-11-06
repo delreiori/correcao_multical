@@ -1,7 +1,7 @@
 import { AutocabRequestError } from './autocab.ts';
 import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
-import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, isBusyFor, isExemptFromOutside, isProtectedZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
+import { chooseBusyFollowZone, chooseTargetZone, distanceToZoneMeters, findOutsideZone, isBusyFor, isExemptFromOutside, isProtectedZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
@@ -72,6 +72,8 @@ export class CorrectionService {
     constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off', driverMessageRecipients: string[] | null = null, driverMessagesTop: number | null = null, reservationMessagesMode: DriverMessagesMode = 'off') { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; this.driverMessageRecipients = driverMessageRecipients; this.driverMessagesTop = driverMessagesTop; this.reservationMessagesMode = reservationMessagesMode; }
     private zoneLookups = new Map<string, { zoneId: number | null; at: number }>();
     private busyRequeuedAt = new Map<number, number>();
+    // GPS_ZONE_TOLERANCE_M: metros além do contorno da zona atual antes de o livre ser movido por GPS.
+    private gpsZoneToleranceMeters = (() => { const value = Number(process.env.GPS_ZONE_TOLERANCE_M ?? 150); return Number.isFinite(value) && value >= 0 ? value : 150; })();
     // Só consulta a Autocab quando o carro se moveu desde a última consulta; parado no ponto, reaproveita.
     private async lookupZone(gateway: AutocabGateway, vehicleId: number, latitude: number, longitude: number, companyId?: number) {
         const key = `${companyId ?? ''}:${vehicleId}:${latitude.toFixed(4)}:${longitude.toFixed(4)}`;
@@ -173,6 +175,7 @@ export class CorrectionService {
         const outsideZoneId = companyId !== undefined ? findOutsideZone(snapshot.zones, rules)?.id : undefined;
         const hasOutsideZone = outsideZoneId !== undefined;
         const busyNotMoved: string[] = [];
+        const keptByTolerance: string[] = [];
         const gpsByVehicle = new Map(snapshot.gpsPositions.map(position => [position.vehicleId, position]));
         for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
             if (Date.now() > this.deadline - 15000) {
@@ -226,6 +229,14 @@ export class CorrectionService {
                 const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, rules), rules);
                 if (!targetZone)
                     continue;
+                // Tolerância do GPS para o livre: só sai da zona atual se o GPS estiver a mais de
+                // GPS_ZONE_TOLERANCE_M do contorno dela. Evita tirar da PA1 (ponto dentro da COPACABANA) quem
+                // está parado na beira do ponto e o pula-pula entre zonas vizinhas com a oscilação do GPS.
+                // Não vale para quem sai de fora de área nem para os ocupados.
+                if (!followsGps && !isBusyFor(status, rules) && currentZone.id !== outsideZoneId && gpsPosition && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, currentZone) <= this.gpsZoneToleranceMeters) {
+                    keptByTolerance.push(`${vehicle.callsign} (${currentZone.name})`);
+                    continue;
+                }
                 // Mesma zona (só recuar para o fim da fila): no máximo uma vez por minuto por carro, caso a
                 // Autocab não aplique a posição e o carro continue à frente.
                 if (followsGps && targetZone.id === currentZone.id) {
@@ -240,6 +251,8 @@ export class CorrectionService {
             this.inspectedCount += chunk.length;
             await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
         }
+        if (keptByTolerance.length > 0)
+            this.notes.push(`mantidos na zona pela tolerância de ${this.gpsZoneToleranceMeters} m do GPS: ${keptByTolerance.slice(0, 15).join(', ')}${keptByTolerance.length > 15 ? ` e mais ${keptByTolerance.length - 15}` : ''}`);
         if (busyNotMoved.length > 0)
             this.notes.push(`ocupados sem mover: ${busyNotMoved.slice(0, 15).join(', ')}${busyNotMoved.length > 15 ? ` e mais ${busyNotMoved.length - 15}` : ''}`);
         return plannedChanges;

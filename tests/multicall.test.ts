@@ -634,3 +634,33 @@ test('nome da empresa ignora espaços: Arcoverde encontra ARCO VERDE', async () 
     assert.equal(await resolveCompanyId({ id: 'a', name: 'Arcoverde', companyName: 'Arcoverde', gateway }, gateway), 7);
     assert.equal(await resolveCompanyId({ id: 's', name: 'São Conrado', companyName: 'São Conrado', gateway }, gateway), 33);
 });
+// Contorno real da zona PA1 da Arcoverde (Autocab, zona 37295).
+const PA1_BOUNDARY = [[-22.961670833333333,-43.18163388888889],[-22.96283777777778,-43.18059777777778],[-22.961701944444446,-43.17803194444444],[-22.959231944444443,-43.17677777777778],[-22.95951277777778,-43.17581583333333],[-22.960565,-43.175465],[-22.962685,-43.174275],[-22.963742777777778,-43.17373777777778],[-22.96478388888889,-43.17319],[-22.96739388888889,-43.180482777777776],[-22.969562777777778,-43.18404],[-22.97046,-43.18320194444444],[-22.971731944444443,-43.184765],[-22.96930777777778,-43.18694083333333],[-22.966711944444445,-43.18907],[-22.965517777777777,-43.187597777777775],[-22.964255833333333,-43.185590833333336],[-22.961670833333333,-43.18163388888889]].map(([latitude, longitude]) => ({ latitude, longitude }));
+test('livre na PA1 com GPS na beira (dentro de 150 m) não é jogado para COPACABANA; longe, é corrigido', async () => {
+    const { distanceToZoneMeters } = await import('../server/rules.ts');
+    const pa1 = { id: 37295, name: 'PA1', companyId: 7, zoneType: 'Normal', boundary: PA1_BOUNDARY };
+    assert.equal(distanceToZoneMeters(-22.965331944444443, -43.181255, pa1), 0, 'centro da PA1 está dentro');
+    assert.ok(Math.abs(distanceToZoneMeters(-22.968697, -43.18113, pa1) - 84) < 5, 'ponto ~84 m fora da PA1');
+    const gateway = new DemoAutocabClient();
+    let gps = { latitude: -22.968697, longitude: -43.18113 };
+    let statuses = [{ vehicleId: 29, zoneId: 37295, queuePosition: 1, status: 'Clear', hasPenalty: false }];
+    gateway.listZones = async () => [pa1, { id: 35877, name: 'COPACABANA', companyId: 7, zoneType: 'Normal' }, { id: 36030, name: 'FORA D AREA', companyId: 7, zoneType: 'OutOfRange' }];
+    gateway.listVehicles = async () => [{ id: 29, callsign: '5029', companyId: 7 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [{ vehicleId: 29, ...gps }];
+    gateway.findZoneByCoordinates = async () => 35877;
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item);
+        return 200;
+    };
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, readConfiguration(), 'live');
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 7, allNotFreeToOutside: true, gateway };
+    await service.runConnection(connection);
+    assert.equal(statuses[0].zoneId, 37295, 'continua na PA1');
+    assert.match(repository.getDashboard().cycles[0].detail ?? '', /mantidos na zona pela tolerância de 150 m do GPS: 5029 \(PA1\)/);
+    gps = { latitude: -22.9722, longitude: -43.181 };
+    await service.runConnection(connection);
+    assert.equal(statuses[0].zoneId, 35877, 'a ~300 m da PA1 vai para COPACABANA');
+    repository.close();
+});

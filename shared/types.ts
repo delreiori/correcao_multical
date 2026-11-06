@@ -6,6 +6,8 @@ export interface Zone {
     companyId: number | null;
     // Tipo da zona na Autocab: Normal, OutOfRange (fora de área), Nak, NoGps, LongBreak, Rejected, Start.
     zoneType?: string | null;
+    // Contorno da zona (latitude/longitude), usado na tolerância da correção por GPS.
+    boundary?: { latitude: number; longitude: number }[];
 }
 export interface Company {
     id: number;

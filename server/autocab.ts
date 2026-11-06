@@ -66,7 +66,8 @@ function parseZone(value: unknown): Zone {
     const name = typeof zone.name === 'string' && zone.name.trim() ? zone.name : zone.descriptor;
     if (typeof name !== 'string' || !name.trim())
         throw new AutocabRequestError('Zona sem nome ou descriptor');
-    return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId), zoneType: typeof zone.zoneType === 'string' ? zone.zoneType : null };
+    const boundary = Array.isArray(zone.boundary) ? zone.boundary.filter((point): point is { latitude: number; longitude: number } => typeof point === 'object' && point !== null && Number.isFinite((point as Record<string, unknown>).latitude) && Number.isFinite((point as Record<string, unknown>).longitude)).map(point => ({ latitude: point.latitude, longitude: point.longitude })) : [];
+    return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId), zoneType: typeof zone.zoneType === 'string' ? zone.zoneType : null, boundary: boundary.length >= 3 ? boundary : undefined };
 }
 function parseCompany(value: unknown): Company {
     const company = requireObject(value);

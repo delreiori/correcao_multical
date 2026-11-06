@@ -318,7 +318,8 @@ function parseZone(value) {
   const name = typeof zone.name === "string" && zone.name.trim() ? zone.name : zone.descriptor;
   if (typeof name !== "string" || !name.trim())
     throw new AutocabRequestError("Zona sem nome ou descriptor");
-  return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId), zoneType: typeof zone.zoneType === "string" ? zone.zoneType : null };
+  const boundary = Array.isArray(zone.boundary) ? zone.boundary.filter((point) => typeof point === "object" && point !== null && Number.isFinite(point.latitude) && Number.isFinite(point.longitude)).map((point) => ({ latitude: point.latitude, longitude: point.longitude })) : [];
+  return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId), zoneType: typeof zone.zoneType === "string" ? zone.zoneType : null, boundary: boundary.length >= 3 ? boundary : void 0 };
 }
 function parseCompany(value) {
   const company = requireObject(value);
@@ -909,6 +910,25 @@ function chooseBusyFollowZone(status, currentZone, gpsZone, statuses, rules) {
   const holdsPositionAheadOfFree = statuses.some((other) => other.zoneId === currentZone.id && other.vehicleId !== status.vehicleId && !isBusy(other) && (other.queuePosition ?? 0) > status.queuePosition);
   return holdsPositionAheadOfFree ? currentZone : null;
 }
+function distanceToZoneMeters(latitude, longitude, zone) {
+  const boundary = zone.boundary;
+  if (!boundary || boundary.length < 3)
+    return Infinity;
+  const metersPerDegreeLatitude = 111320;
+  const metersPerDegreeLongitude = 111320 * Math.cos(latitude * Math.PI / 180);
+  const points = boundary.map((point) => ({ x: (point.longitude - longitude) * metersPerDegreeLongitude, y: (point.latitude - latitude) * metersPerDegreeLatitude }));
+  let inside = false;
+  let nearest = Infinity;
+  for (let index = 0, previous = points.length - 1; index < points.length; previous = index++) {
+    const a = points[index], b = points[previous];
+    if (a.y > 0 !== b.y > 0 && 0 < (b.x - a.x) * (0 - a.y) / (b.y - a.y) + a.x)
+      inside = !inside;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const t = dx === 0 && dy === 0 ? 0 : Math.max(0, Math.min(1, -(a.x * dx + a.y * dy) / (dx * dx + dy * dy)));
+    nearest = Math.min(nearest, Math.hypot(a.x + t * dx, a.y + t * dy));
+  }
+  return inside ? 0 : nearest;
+}
 function calculateQueueTail(statuses, zoneId) {
   const zoneStatuses = statuses.filter((status) => status.zoneId === zoneId);
   const highestPosition = zoneStatuses.reduce((highest, status) => Math.max(highest, status.queuePosition ?? 0), 0);
@@ -1038,6 +1058,11 @@ var CorrectionService = class {
   }
   zoneLookups = /* @__PURE__ */ new Map();
   busyRequeuedAt = /* @__PURE__ */ new Map();
+  // GPS_ZONE_TOLERANCE_M: metros além do contorno da zona atual antes de o livre ser movido por GPS.
+  gpsZoneToleranceMeters = (() => {
+    const value = Number(process.env.GPS_ZONE_TOLERANCE_M ?? 150);
+    return Number.isFinite(value) && value >= 0 ? value : 150;
+  })();
   // Só consulta a Autocab quando o carro se moveu desde a última consulta; parado no ponto, reaproveita.
   async lookupZone(gateway, vehicleId, latitude, longitude, companyId) {
     const key = `${companyId ?? ""}:${vehicleId}:${latitude.toFixed(4)}:${longitude.toFixed(4)}`;
@@ -1134,6 +1159,7 @@ var CorrectionService = class {
     const outsideZoneId = companyId !== void 0 ? findOutsideZone(snapshot.zones, rules)?.id : void 0;
     const hasOutsideZone = outsideZoneId !== void 0;
     const busyNotMoved = [];
+    const keptByTolerance = [];
     const gpsByVehicle = new Map(snapshot.gpsPositions.map((position) => [position.vehicleId, position]));
     for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
       if (Date.now() > this.deadline - 15e3) {
@@ -1183,6 +1209,10 @@ var CorrectionService = class {
         const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, rules), rules);
         if (!targetZone)
           continue;
+        if (!followsGps && !isBusyFor(status, rules) && currentZone.id !== outsideZoneId && gpsPosition && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, currentZone) <= this.gpsZoneToleranceMeters) {
+          keptByTolerance.push(`${vehicle.callsign} (${currentZone.name})`);
+          continue;
+        }
         if (followsGps && targetZone.id === currentZone.id) {
           if (Date.now() - (this.busyRequeuedAt.get(status.vehicleId) ?? 0) < 6e4)
             continue;
@@ -1195,6 +1225,8 @@ var CorrectionService = class {
       this.inspectedCount += chunk.length;
       await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
     }
+    if (keptByTolerance.length > 0)
+      this.notes.push(`mantidos na zona pela toler\xE2ncia de ${this.gpsZoneToleranceMeters} m do GPS: ${keptByTolerance.slice(0, 15).join(", ")}${keptByTolerance.length > 15 ? ` e mais ${keptByTolerance.length - 15}` : ""}`);
     if (busyNotMoved.length > 0)
       this.notes.push(`ocupados sem mover: ${busyNotMoved.slice(0, 15).join(", ")}${busyNotMoved.length > 15 ? ` e mais ${busyNotMoved.length - 15}` : ""}`);
     return plannedChanges;

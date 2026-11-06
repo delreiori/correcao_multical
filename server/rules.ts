@@ -109,6 +109,27 @@ export function chooseBusyFollowZone(status: VehicleStatus, currentZone: Zone, g
     const holdsPositionAheadOfFree = statuses.some(other => other.zoneId === currentZone.id && other.vehicleId !== status.vehicleId && !isBusy(other) && (other.queuePosition ?? 0) > status.queuePosition!);
     return holdsPositionAheadOfFree ? currentZone : null;
 }
+// Distância em metros do ponto ao contorno da zona (0 se estiver dentro). Sem contorno: Infinity.
+// Projeção equiretangular local: precisa o bastante para dezenas/centenas de metros.
+export function distanceToZoneMeters(latitude: number, longitude: number, zone: Zone): number {
+    const boundary = zone.boundary;
+    if (!boundary || boundary.length < 3)
+        return Infinity;
+    const metersPerDegreeLatitude = 111_320;
+    const metersPerDegreeLongitude = 111_320 * Math.cos(latitude * Math.PI / 180);
+    const points = boundary.map(point => ({ x: (point.longitude - longitude) * metersPerDegreeLongitude, y: (point.latitude - latitude) * metersPerDegreeLatitude }));
+    let inside = false;
+    let nearest = Infinity;
+    for (let index = 0, previous = points.length - 1; index < points.length; previous = index++) {
+        const a = points[index], b = points[previous];
+        if ((a.y > 0) !== (b.y > 0) && 0 < (b.x - a.x) * (0 - a.y) / (b.y - a.y) + a.x)
+            inside = !inside;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const t = dx === 0 && dy === 0 ? 0 : Math.max(0, Math.min(1, -(a.x * dx + a.y * dy) / (dx * dx + dy * dy)));
+        nearest = Math.min(nearest, Math.hypot(a.x + t * dx, a.y + t * dy));
+    }
+    return inside ? 0 : nearest;
+}
 export function calculateQueueTail(statuses: VehicleStatus[], zoneId: number): number {
     const zoneStatuses = statuses.filter(status => status.zoneId === zoneId);
     const highestPosition = zoneStatuses.reduce((highest, status) => Math.max(highest, status.queuePosition ?? 0), 0);
