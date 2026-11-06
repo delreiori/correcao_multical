@@ -434,15 +434,15 @@ test('qualquer ocupação conta como ocupado; só Clear é livre e fora de servi
     for (const name of ['Clear', 'Available', 'Livre'])
         assert.ok(!isBusy(status(name)) && isAvailable(status(name)), name);
     for (const name of ['NotWorking', 'OnBreak', 'Suspended'])
-        assert.ok(!isBusy(status(name)) && !isAvailable(status(name)), name);
+        assert.ok(isBusy(status(name)) && !isAvailable(status(name)), `${name}: todo não livre vai para fora de área`);
     assert.ok(isBusy(status('Clear', { atPickup: true })), 'indo buscar passageiro');
     assert.ok(isBusy(status('Clear', { dispatchInProgress: true })), 'despacho em andamento');
     const previous = { free: process.env.FREE_STATUSES, busy: process.env.BUSY_STATUSES };
     try {
         process.env.FREE_STATUSES = 'Waiting';
-        process.env.BUSY_STATUSES = 'OnBreak';
+        process.env.BUSY_STATUSES = 'Clear';
         assert.ok(!isBusy(status('waiting')));
-        assert.ok(isBusy(status('OnBreak')));
+        assert.ok(isBusy(status('Clear')));
     } finally {
         for (const [name, value] of [['FREE_STATUSES', previous.free], ['BUSY_STATUSES', previous.busy]] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     }
@@ -501,5 +501,30 @@ test('envio sem confirmação trava o carro só por 2 minutos e o detalhe mostra
     assert.equal(statuses.find(item => item.vehicleId === 951)?.zoneId, 13);
     const changes = repository.getDashboard().changes;
     assert.deepEqual(changes.map(change => change.outcome), ['confirmed', 'failed']);
+    repository.close();
+});
+test('todos que não estão livres vão para FORA D AREA, menos NAK e sem sinal de GPS', async () => {
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 1, zoneId: 11, queuePosition: 1, status: 'BusyMeterOnFromClear', hasPenalty: false },
+        { vehicleId: 2, zoneId: 11, queuePosition: 2, status: 'NotWorking', hasPenalty: false },
+        { vehicleId: 3, zoneId: 11, queuePosition: 3, status: 'Clear', hasPenalty: false },
+        { vehicleId: 4, zoneId: 14, queuePosition: 1, status: 'BusyMeterOff', hasPenalty: false },
+        { vehicleId: 5, zoneId: 15, queuePosition: 1, status: 'BusyMeterOff', hasPenalty: false },
+        { vehicleId: 6, zoneId: 11, queuePosition: 4, status: 'NoGps', hasPenalty: false },
+        { vehicleId: 7, zoneId: 11, queuePosition: 5, status: 'NAK', hasPenalty: false },
+    ];
+    gateway.listZones = async () => [{ id: 11, name: 'GAVEA', companyId: 1 }, { id: 13, name: 'FORA D AREA', companyId: 1 }, { id: 14, name: 'NAK', companyId: 1 }, { id: 15, name: 'S/GPS', companyId: 1 }];
+    gateway.listVehicles = async () => statuses.map(item => ({ id: item.vehicleId, callsign: String(5000 + item.vehicleId), companyId: 1 }));
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [];
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item);
+        return 200;
+    };
+    const repository = new AuditRepository(':memory:');
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, gateway });
+    assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[1, 13], [2, 13], [3, 11], [4, 14], [5, 15], [6, 11], [7, 11]]);
+    assert.match(repository.getDashboard().cycles[0].detail ?? '', /ocupados sem mover: .*5004 \(zona protegida NAK\).*5005 \(zona protegida S\/GPS\).*5006 \(status NoGps\).*5007 \(status NAK\)/);
     repository.close();
 });

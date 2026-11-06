@@ -25,16 +25,18 @@ export function isOffDuty(status: VehicleStatus) {
     const name = normalizeStatusName(status.status);
     return OFF_DUTY_PATTERN.test(name) && !statusList('BUSY_STATUSES').has(name);
 }
+// Ocupado = qualquer status que não seja livre (inclusive fora de serviço/pausa): todos vão para fora
+// de área, menos NAK e sem sinal de GPS (veja isExemptFromOutside e as zonas protegidas).
 export function isBusy(status: VehicleStatus) {
     if (status.atPickup || status.dispatchInProgress)
         return true;
     const name = normalizeStatusName(status.status);
     if (statusList('BUSY_STATUSES').has(name))
         return true;
-    if (statusList('FREE_STATUSES').has(name) || FREE_STATUS_PATTERN.test(name))
-        return false;
-    return !OFF_DUTY_PATTERN.test(name);
+    return !(statusList('FREE_STATUSES').has(name) || FREE_STATUS_PATTERN.test(name));
 }
+// Status NAK ou sem sinal de GPS não vão para fora de área (as zonas NAK e S/GPS são protegidas).
+export function isExemptFromOutside(status: VehicleStatus) { return /(^|[^a-z])nak([^a-z]|$)|gps/.test(normalizeStatusName(status.status)); }
 // Livre de verdade, na fila esperando corrida: nem ocupado nem fora de serviço.
 export function isAvailable(status: VehicleStatus) { return !isBusy(status) && !isOffDuty(status); }
 // Resumo dos tipos de status da empresa (ex.: "Clear 40, BusyMeterOnFromClear 3 (ocupado)"), para
@@ -67,7 +69,7 @@ export function chooseTargetZone(status: VehicleStatus, currentZone: Zone, gpsZo
     if (status.hasPenalty)
         return null;
     if (isBusy(status)) {
-        if (!outsideZone || outsideZone.id === currentZone.id || isProtectedZone(currentZone, rules))
+        if (!outsideZone || outsideZone.id === currentZone.id || isProtectedZone(currentZone, rules) || isExemptFromOutside(status))
             return null;
         return outsideZone;
     }

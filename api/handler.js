@@ -242,7 +242,7 @@ function readConfiguration() {
     panelToken,
     intervalMs: Math.max(5e3, readPositiveInteger(process.env.CYCLE_INTERVAL_MS, 6e4)),
     autoStart: process.env.AUTO_START !== "false",
-    protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA,FORA D AREA").split(",").map((name) => name.trim()).filter(Boolean),
+    protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA,FORA D AREA,S/GPS,SEM GPS").split(",").map((name) => name.trim()).filter(Boolean),
     // Nomes aceitos para a zona de fora de área, separados por vírgula (a Arcoverde usa "FORA D AREA").
     outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? "FORA D AREA,FORA DE AREA",
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
@@ -813,9 +813,10 @@ function isBusy(status) {
   const name = normalizeStatusName(status.status);
   if (statusList("BUSY_STATUSES").has(name))
     return true;
-  if (statusList("FREE_STATUSES").has(name) || FREE_STATUS_PATTERN.test(name))
-    return false;
-  return !OFF_DUTY_PATTERN.test(name);
+  return !(statusList("FREE_STATUSES").has(name) || FREE_STATUS_PATTERN.test(name));
+}
+function isExemptFromOutside(status) {
+  return /(^|[^a-z])nak([^a-z]|$)|gps/.test(normalizeStatusName(status.status));
 }
 function isAvailable(status) {
   return !isBusy(status) && !isOffDuty(status);
@@ -846,7 +847,7 @@ function chooseTargetZone(status, currentZone, gpsZone, outsideZone, rules) {
   if (status.hasPenalty)
     return null;
   if (isBusy(status)) {
-    if (!outsideZone || outsideZone.id === currentZone.id || isProtectedZone(currentZone, rules))
+    if (!outsideZone || outsideZone.id === currentZone.id || isProtectedZone(currentZone, rules) || isExemptFromOutside(status))
       return null;
     return outsideZone;
   }
@@ -1090,6 +1091,8 @@ var CorrectionService = class {
           return skipBusy("zona de outra empresa ou desconhecida");
         if (isBusy(status) && !connection.busyFollowsGps && isProtectedZone(currentZone, this.rules) && currentZone.id !== outsideZoneId)
           skipBusy(`zona protegida ${currentZone.name}`);
+        else if (isBusy(status) && !connection.busyFollowsGps && isExemptFromOutside(status))
+          skipBusy(`status ${status.status}`);
         const gpsPosition = gpsByVehicle.get(status.vehicleId);
         const gpsZoneId = (!isBusy(status) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
         return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };

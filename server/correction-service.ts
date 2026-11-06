@@ -1,7 +1,7 @@
 import { AutocabRequestError } from './autocab.ts';
 import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
-import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, isProtectedZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
+import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, isExemptFromOutside, isProtectedZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
@@ -164,6 +164,8 @@ export class CorrectionService {
                     return skipBusy('zona de outra empresa ou desconhecida');
                 if (isBusy(status) && !connection.busyFollowsGps && isProtectedZone(currentZone, this.rules) && currentZone.id !== outsideZoneId)
                     skipBusy(`zona protegida ${currentZone.name}`);
+                else if (isBusy(status) && !connection.busyFollowsGps && isExemptFromOutside(status))
+                    skipBusy(`status ${status.status}`);
                 const gpsPosition = gpsByVehicle.get(status.vehicleId);
                 const gpsZoneId = (!isBusy(status) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
                 return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
