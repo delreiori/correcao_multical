@@ -4,17 +4,39 @@ export interface ZoneRules {
     outsideZoneName: string;
 }
 export function normalizeZoneName(name: string) { return name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase(); }
-// Ocupado: os tipos Busy* da Autocab (BusyMeterOnFromClear é a corrida de rua/street booking) e nomes
-// equivalentes de corrida de rua, passageiro a bordo ou despacho. BUSY_STATUSES acrescenta outros
-// tipos exatos, separados por vírgula, sem mudar o código.
-const BUSY_STATUS_PATTERN = /busy|ocupad|street|pick ?up|picked|meter ?on|dispatch|passenger|on ?job|hired|engaged/i;
-let extraBusyStatuses: { source: string | undefined; names: Set<string> } = { source: undefined, names: new Set() };
-export function isBusy(status: VehicleStatus) {
-    const source = process.env.BUSY_STATUSES;
-    if (extraBusyStatuses.source !== source)
-        extraBusyStatuses = { source, names: new Set((source ?? '').split(',').map(name => name.trim().toLowerCase()).filter(Boolean)) };
-    return BUSY_STATUS_PATTERN.test(status.status) || extraBusyStatuses.names.has(status.status.trim().toLowerCase());
+// Livre é só o status de livre da Autocab (Clear e equivalentes); fora de serviço/pausa não é ocupado.
+// Qualquer outro status de quem está trabalhando conta como ocupado (Busy*, corrida de rua, oferta de
+// corrida, quase livre etc.), e também atPickup/dispatchInProgress mesmo com status Clear.
+// FREE_STATUSES e BUSY_STATUSES ajustam tipos exatos, separados por vírgula, sem mudar o código.
+const FREE_STATUS_PATTERN = /^(clear|available|free|livre|disponivel)$/;
+const OFF_DUTY_PATTERN = /not ?working|offline|off ?duty|logged ?(off|out)|break|pausa|suspen|away|fora de servico/;
+const statusLists = new Map<string, { source: string | undefined; names: Set<string> }>();
+function statusList(variable: 'FREE_STATUSES' | 'BUSY_STATUSES') {
+    const source = process.env[variable];
+    let list = statusLists.get(variable);
+    if (!list || list.source !== source) {
+        list = { source, names: new Set((source ?? '').split(',').map(name => normalizeStatusName(name)).filter(Boolean)) };
+        statusLists.set(variable, list);
+    }
+    return list.names;
 }
+function normalizeStatusName(name: string) { return name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase(); }
+export function isOffDuty(status: VehicleStatus) {
+    const name = normalizeStatusName(status.status);
+    return OFF_DUTY_PATTERN.test(name) && !statusList('BUSY_STATUSES').has(name);
+}
+export function isBusy(status: VehicleStatus) {
+    if (status.atPickup || status.dispatchInProgress)
+        return true;
+    const name = normalizeStatusName(status.status);
+    if (statusList('BUSY_STATUSES').has(name))
+        return true;
+    if (statusList('FREE_STATUSES').has(name) || FREE_STATUS_PATTERN.test(name))
+        return false;
+    return !OFF_DUTY_PATTERN.test(name);
+}
+// Livre de verdade, na fila esperando corrida: nem ocupado nem fora de serviço.
+export function isAvailable(status: VehicleStatus) { return !isBusy(status) && !isOffDuty(status); }
 // Resumo dos tipos de status da empresa (ex.: "Clear 40, BusyMeterOnFromClear 3 (ocupado)"), para
 // conferir no painel como a Autocab informa cada situação.
 export function summarizeStatuses(statuses: VehicleStatus[]) {

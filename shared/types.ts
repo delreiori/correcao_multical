@@ -20,6 +20,9 @@ export interface VehicleStatus {
     queuePosition: number | null;
     status: string;
     hasPenalty: boolean;
+    // Indo buscar o passageiro / despacho em andamento: contam como ocupado mesmo com status Clear.
+    atPickup?: boolean;
+    dispatchInProgress?: boolean;
 }
 export interface VehicleGpsPosition {
     vehicleId: number;

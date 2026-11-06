@@ -426,20 +426,45 @@ test('zona de fora de área aceita "FORA D AREA" (Arcoverde) e "FORA DE AREA"', 
     assert.ok(isProtectedZone({ id: 2, name: 'FORA D AREA', companyId: 1 }, configuration));
     assert.throws(() => findOutsideZone([{ id: 2, name: 'FORA D AREA', companyId: 1 }, { id: 3, name: 'FORA DE AREA', companyId: 1 }], configuration), /ambígua/);
 });
-test('corrida de rua e variações contam como ocupado; BUSY_STATUSES acrescenta tipos', async () => {
-    const { isBusy, summarizeStatuses } = await import('../server/rules.ts');
-    const status = (name: string) => ({ vehicleId: 1, zoneId: 1, queuePosition: 1, status: name, hasPenalty: false });
-    for (const name of ['BusyMeterOnFromClear', 'StreetPickup', 'Street Booking', 'PickedUp', 'MeterOn', 'BusyMeterOff', 'Dispatched', 'Ocupado (Corrida de Rua)'])
+test('qualquer ocupação conta como ocupado; só Clear é livre e fora de serviço não é ocupado', async () => {
+    const { isBusy, isAvailable, summarizeStatuses } = await import('../server/rules.ts');
+    const status = (name: string, extra: object = {}) => ({ vehicleId: 1, zoneId: 1, queuePosition: 1, status: name, hasPenalty: false, ...extra });
+    for (const name of ['BusyMeterOnFromClear', 'BusyMeterOff', 'BusyMeterOnFromMeterOffCash', 'StreetPickup', 'PickedUp', 'MeterOn', 'Dispatched', 'JobOffered', 'SoonToClear', 'Ocupado (Corrida de Rua)', 'QualquerOutroStatus'])
         assert.ok(isBusy(status(name)), name);
-    for (const name of ['Clear', 'NotWorking', 'Available'])
-        assert.ok(!isBusy(status(name)), name);
-    const previous = process.env.BUSY_STATUSES;
+    for (const name of ['Clear', 'Available', 'Livre'])
+        assert.ok(!isBusy(status(name)) && isAvailable(status(name)), name);
+    for (const name of ['NotWorking', 'OnBreak', 'Suspended'])
+        assert.ok(!isBusy(status(name)) && !isAvailable(status(name)), name);
+    assert.ok(isBusy(status('Clear', { atPickup: true })), 'indo buscar passageiro');
+    assert.ok(isBusy(status('Clear', { dispatchInProgress: true })), 'despacho em andamento');
+    const previous = { free: process.env.FREE_STATUSES, busy: process.env.BUSY_STATUSES };
     try {
-        process.env.BUSY_STATUSES = 'Rua, OnTheWay';
-        assert.ok(isBusy(status('Rua')) && isBusy(status('onTheWay')));
+        process.env.FREE_STATUSES = 'Waiting';
+        process.env.BUSY_STATUSES = 'OnBreak';
+        assert.ok(!isBusy(status('waiting')));
+        assert.ok(isBusy(status('OnBreak')));
     } finally {
-        if (previous === undefined) delete process.env.BUSY_STATUSES; else process.env.BUSY_STATUSES = previous;
+        for (const [name, value] of [['FREE_STATUSES', previous.free], ['BUSY_STATUSES', previous.busy]] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     }
-    assert.ok(!isBusy(status('Rua')));
     assert.equal(summarizeStatuses([status('Clear'), status('Clear'), status('StreetPickup')]), 'Clear 2, StreetPickup 1 (ocupado)');
+});
+test('ocupados que já estão na fila hoje também vão para FORA D AREA', async () => {
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 901, zoneId: 11, queuePosition: 1, status: 'JobOffered', hasPenalty: false },
+        { vehicleId: 902, zoneId: 11, queuePosition: 2, status: 'Clear', hasPenalty: false, atPickup: true },
+        { vehicleId: 903, zoneId: 11, queuePosition: 3, status: 'Clear', hasPenalty: false },
+    ];
+    gateway.listZones = async () => [{ id: 11, name: 'PA1', companyId: 1 }, { id: 13, name: 'FORA D AREA', companyId: 1 }];
+    gateway.listVehicles = async () => [901, 902, 903].map(id => ({ id, callsign: String(id), companyId: 1 }));
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [];
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item);
+        return 200;
+    };
+    const repository = new AuditRepository(':memory:');
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, gateway });
+    assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[901, 13], [902, 13], [903, 11]]);
+    repository.close();
 });

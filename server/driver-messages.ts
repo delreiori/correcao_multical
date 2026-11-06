@@ -2,7 +2,7 @@ import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
 import type { DriverMessagesMode } from './config.ts';
 import { AutocabRequestError } from './autocab.ts';
-import { isBusy, isProtectedZone } from './rules.ts';
+import { isAvailable, isProtectedZone } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { DriverMessageOutcome, OperatingMode, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 export interface ZoneQueue {
@@ -17,7 +17,7 @@ const MESSAGE_CONCURRENCY = 16;
 export function buildZoneQueues(zones: Zone[], statuses: VehicleStatus[], vehiclesById: Map<number, Vehicle>, rules: ZoneRules): ZoneQueue[] {
     return zones.filter(zone => !isProtectedZone(zone, rules)).map(zone => {
         const drivers = statuses
-            .filter(status => status.zoneId === zone.id && !isBusy(status) && vehiclesById.has(status.vehicleId))
+            .filter(status => status.zoneId === zone.id && isAvailable(status) && vehiclesById.has(status.vehicleId))
             .sort((left, right) => (left.queuePosition ?? Infinity) - (right.queuePosition ?? Infinity) || left.vehicleId - right.vehicleId)
             .map(status => ({ vehicleId: status.vehicleId, callsign: vehiclesById.get(status.vehicleId)!.callsign }));
         return { zone, drivers };

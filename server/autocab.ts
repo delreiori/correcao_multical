@@ -74,7 +74,7 @@ function parseVehicleStatus(value: unknown): VehicleStatus {
     const status = requireObject(value);
     if (typeof status.vehicleStatusType !== 'string' || !status.vehicleStatusType.trim() || !Object.hasOwn(status, 'penalty'))
         throw new AutocabRequestError('Status sem vehicleStatusType ou penalty; confirme o contrato');
-    return { vehicleId: requireIdentifier(status.id), zoneId: optionalIdentifier(status.zoneId), queuePosition: optionalIdentifier(status.queuePosition), status: status.vehicleStatusType, hasPenalty: status.penalty != null };
+    return { vehicleId: requireIdentifier(status.id), zoneId: optionalIdentifier(status.zoneId), queuePosition: optionalIdentifier(status.queuePosition), status: status.vehicleStatusType, hasPenalty: status.penalty != null, atPickup: status.atPickup === true, dispatchInProgress: status.dispatchInProgress === true };
 }
 function parseGpsPosition(value: unknown): VehicleGpsPosition | null {
     const position = requireObject(value);

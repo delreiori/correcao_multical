@@ -317,7 +317,7 @@ function parseVehicleStatus(value) {
   const status = requireObject(value);
   if (typeof status.vehicleStatusType !== "string" || !status.vehicleStatusType.trim() || !Object.hasOwn(status, "penalty"))
     throw new AutocabRequestError("Status sem vehicleStatusType ou penalty; confirme o contrato");
-  return { vehicleId: requireIdentifier(status.id), zoneId: optionalIdentifier(status.zoneId), queuePosition: optionalIdentifier(status.queuePosition), status: status.vehicleStatusType, hasPenalty: status.penalty != null };
+  return { vehicleId: requireIdentifier(status.id), zoneId: optionalIdentifier(status.zoneId), queuePosition: optionalIdentifier(status.queuePosition), status: status.vehicleStatusType, hasPenalty: status.penalty != null, atPickup: status.atPickup === true, dispatchInProgress: status.dispatchInProgress === true };
 }
 function parseGpsPosition(value) {
   const position = requireObject(value);
@@ -788,13 +788,37 @@ var PostgresAuditRepository = class {
 function normalizeZoneName(name) {
   return name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toUpperCase();
 }
-var BUSY_STATUS_PATTERN = /busy|ocupad|street|pick ?up|picked|meter ?on|dispatch|passenger|on ?job|hired|engaged/i;
-var extraBusyStatuses = { source: void 0, names: /* @__PURE__ */ new Set() };
+var FREE_STATUS_PATTERN = /^(clear|available|free|livre|disponivel)$/;
+var OFF_DUTY_PATTERN = /not ?working|offline|off ?duty|logged ?(off|out)|break|pausa|suspen|away|fora de servico/;
+var statusLists = /* @__PURE__ */ new Map();
+function statusList(variable) {
+  const source = process.env[variable];
+  let list = statusLists.get(variable);
+  if (!list || list.source !== source) {
+    list = { source, names: new Set((source ?? "").split(",").map((name) => normalizeStatusName(name)).filter(Boolean)) };
+    statusLists.set(variable, list);
+  }
+  return list.names;
+}
+function normalizeStatusName(name) {
+  return name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+}
+function isOffDuty(status) {
+  const name = normalizeStatusName(status.status);
+  return OFF_DUTY_PATTERN.test(name) && !statusList("BUSY_STATUSES").has(name);
+}
 function isBusy(status) {
-  const source = process.env.BUSY_STATUSES;
-  if (extraBusyStatuses.source !== source)
-    extraBusyStatuses = { source, names: new Set((source ?? "").split(",").map((name) => name.trim().toLowerCase()).filter(Boolean)) };
-  return BUSY_STATUS_PATTERN.test(status.status) || extraBusyStatuses.names.has(status.status.trim().toLowerCase());
+  if (status.atPickup || status.dispatchInProgress)
+    return true;
+  const name = normalizeStatusName(status.status);
+  if (statusList("BUSY_STATUSES").has(name))
+    return true;
+  if (statusList("FREE_STATUSES").has(name) || FREE_STATUS_PATTERN.test(name))
+    return false;
+  return !OFF_DUTY_PATTERN.test(name);
+}
+function isAvailable(status) {
+  return !isBusy(status) && !isOffDuty(status);
 }
 function summarizeStatuses(statuses) {
   const counts = /* @__PURE__ */ new Map();
@@ -858,7 +882,7 @@ function describeChange(status, currentZone, targetZone, callsign, gpsPosition, 
 var MESSAGE_CONCURRENCY = 16;
 function buildZoneQueues(zones, statuses, vehiclesById, rules) {
   return zones.filter((zone) => !isProtectedZone(zone, rules)).map((zone) => {
-    const drivers = statuses.filter((status) => status.zoneId === zone.id && !isBusy(status) && vehiclesById.has(status.vehicleId)).sort((left, right) => (left.queuePosition ?? Infinity) - (right.queuePosition ?? Infinity) || left.vehicleId - right.vehicleId).map((status) => ({ vehicleId: status.vehicleId, callsign: vehiclesById.get(status.vehicleId).callsign }));
+    const drivers = statuses.filter((status) => status.zoneId === zone.id && isAvailable(status) && vehiclesById.has(status.vehicleId)).sort((left, right) => (left.queuePosition ?? Infinity) - (right.queuePosition ?? Infinity) || left.vehicleId - right.vehicleId).map((status) => ({ vehicleId: status.vehicleId, callsign: vehiclesById.get(status.vehicleId).callsign }));
     return { zone, drivers };
   });
 }
@@ -1081,20 +1105,20 @@ var CorrectionService = class {
   async verifySentChanges(gateway, sentChanges) {
     if (sentChanges.length === 0)
       return null;
-    let statusList;
+    let statusList2;
     try {
-      statusList = await gateway.listVehicleStatuses();
+      statusList2 = await gateway.listVehicleStatuses();
     } catch {
       for (const { changeId, httpStatus } of sentChanges)
         await this.repository.finishChange(changeId, "unconfirmed", httpStatus, "POST aceito; consulta de confirma\xE7\xE3o falhou. N\xE3o repetir automaticamente.");
       return null;
     }
-    const latestStatuses = new Map(statusList.map((status) => [status.vehicleId, status]));
+    const latestStatuses = new Map(statusList2.map((status) => [status.vehicleId, status]));
     for (const { change, changeId, httpStatus } of sentChanges) {
       const isConfirmed = latestStatuses.get(change.vehicleId)?.zoneId === change.targetZoneId;
       await this.repository.finishChange(changeId, isConfirmed ? "confirmed" : "unconfirmed", httpStatus, isConfirmed ? "Zona confirmada ap\xF3s envio; posi\xE7\xE3o enviada registrada no hist\xF3rico." : "POST aceito; zona ainda n\xE3o confirmada. Ve\xEDculo bloqueado para nova tentativa autom\xE1tica.");
     }
-    return statusList;
+    return statusList2;
   }
   async recordSendFailure(changeId, error) {
     const httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
