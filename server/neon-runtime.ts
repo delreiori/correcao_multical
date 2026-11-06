@@ -159,14 +159,25 @@ export function parseDatabaseUrl(rawValue: string): URL {
         throw new Error('DATABASE_URL inválida: confira host e porta (ex.: aws-0-<região>.pooler.supabase.com:5432)');
     }
 }
+// O Session pooler do Supabase (porta 5432) segura uma conexão por cliente e tem limite baixo: com as
+// passadas rápidas, o painel e várias instâncias da função, estoura e o banco recusa de tempos em tempos.
+// O Transaction pooler (6543, mesmo host) divide as conexões; o backend não usa recursos de sessão.
+export function preferTransactionPooler(url: URL): URL {
+    if (url.hostname.endsWith('.pooler.supabase.com') && (url.port === '5432' || url.port === '')) {
+        const transactionUrl = new URL(url.toString());
+        transactionUrl.port = '6543';
+        return transactionUrl;
+    }
+    return url;
+}
 function createDatabasePool(databaseUrl: string) {
-    const parsedUrl = parseDatabaseUrl(databaseUrl);
+    const parsedUrl = preferTransactionPooler(parseDatabaseUrl(databaseUrl));
     // Keep TLS certificate verification active, including when the provider gives sslmode=require.
     for (const parameter of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert'])
         parsedUrl.searchParams.delete(parameter);
     // Sem statement_timeout na conexão: poolers (Supabase/PgBouncer) recusam parâmetros de início
     // desconhecidos. query_timeout limita cada consulta do lado do cliente.
-    return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true, ca: databaseCertificateAuthorities(parsedUrl.hostname) }, max: 3, connectionTimeoutMillis: 8000, query_timeout: 8000, idleTimeoutMillis: 10000 });
+    return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true, ca: databaseCertificateAuthorities(parsedUrl.hostname) }, max: 3, connectionTimeoutMillis: 8000, query_timeout: 8000, idleTimeoutMillis: 5000 });
 }
 // CAs aceitas no TLS do banco: as públicas do Node, a raiz do Supabase quando o host é do Supabase e,
 // opcionalmente, DATABASE_SSL_CA (PEM; aceita "\n" escrito no lugar das quebras). A verificação nunca é desligada.
@@ -190,8 +201,8 @@ export function describeDatabaseError(error: unknown) {
         return `endereço do banco inacessível (${code}); no Supabase use a connection string do pooler (Session ou Transaction pooler), não a direta`;
     if (['ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET'].includes(code))
         return `banco não respondeu (${code}); confira se o projeto está ativo`;
-    if (code === '53300' || code === 'XX000')
-        return `banco recusou a conexão (${code}); confira limites e status do projeto`;
+    if (code === '53300' || code === 'XX000' || code === 'EMAXCONNSESSION' || code === '08P01')
+        return `limite de conexões do banco atingido (${code}); use o Transaction pooler (porta 6543) do Supabase`;
     return code ? `falha ao conectar (${code})` : 'falha ao conectar';
 }
 async function initializeDatabase(pool: Pool) {

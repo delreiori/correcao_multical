@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { createNeonRuntime, CycleAlreadyRunningError } from './neon-runtime.ts';
+import { createNeonRuntime, CycleAlreadyRunningError, describeDatabaseError } from './neon-runtime.ts';
 import { listCompaniesForConnections } from './companies.ts';
 import { CRON_CHECK_WINDOW_MS, CRON_PASS_WINDOW_MS, readCronRepeatIntervalMs, readFastPassIntervalMs, readQueuePollIntervalMs } from './execution-limits.ts';
 import { waitUntil } from '@vercel/functions';
@@ -160,7 +160,9 @@ export function createServerlessHandler(loadRuntime: () => Promise<NeonRuntime>,
                 return;
             }
             logBackendError('Falha ao executar a rota no backend', error);
-            sendJson(response, 503, { error: 'Falha ao acessar o backend. Confira DATABASE_URL e as configurações da Vercel.' });
+            // O código do erro diz se é limite de conexões, rede ou senha, sem expor dados da conexão.
+            const hasCode = Boolean(error && typeof error === 'object' && 'code' in error);
+            sendJson(response, 503, { error: hasCode ? `Falha ao acessar o banco: ${describeDatabaseError(error)}. Tente de novo em instantes; se continuar, confira DATABASE_URL.` : 'Falha ao acessar o backend. Tente de novo em instantes; detalhes no log da função na Vercel.' });
         }
     };
 }

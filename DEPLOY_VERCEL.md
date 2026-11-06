@@ -7,7 +7,7 @@ A Vercel serve o frontend Vite e as rotas `/api/*` pela função `api/handler.js
 O backend usa PostgreSQL comum; funciona no Supabase (ou no Neon). As tabelas são criadas sozinhas na primeira chamada, com RLS ligado para a API pública do Supabase não expor os dados.
 
 1. Crie o projeto no Supabase e anote a senha do banco.
-2. Em **Connect**, copie a connection string do **Session pooler** (host `…pooler.supabase.com`, porta 5432) e troque `[YOUR-PASSWORD]` pela senha. Não use a conexão direta (`db.<projeto>.supabase.co`): ela é só IPv6 e a Vercel não alcança.
+2. Em **Connect**, copie a connection string do **Transaction pooler** (host `…pooler.supabase.com`, porta 6543; se colar a do Session pooler, porta 5432, o backend troca sozinho para 6543) e troque `[YOUR-PASSWORD]` pela senha. Não use a conexão direta (`db.<projeto>.supabase.co`): ela é só IPv6 e a Vercel não alcança.
 3. Troque `DATABASE_URL` na Vercel pela nova string e faça Redeploy. O certificado raiz do Supabase (Supabase Root 2021 CA) já vem no código e é usado automaticamente para hosts `*.supabase.com`; a verificação TLS continua ativa. `DATABASE_SSL_CA` só é necessária para outro certificado.
 
 Se a conexão falhar, o 503 do `/api/cron` e o painel dizem o motivo: certificado não reconhecido, endereço inacessível (use o pooler), usuário/senha ou banco sem resposta. O histórico do Neon não é migrado; o Supabase começa vazio e a primeira leitura de cada fila só é guardada, sem avisos.

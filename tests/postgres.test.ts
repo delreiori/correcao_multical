@@ -385,3 +385,13 @@ test('conferência de fila avisa com uma leitura de status, sem GPS e sem ciclo'
         assert.equal((await repository.getDashboard()).cycles.length, cycles);
     } finally { await database.close(); }
 });
+test('Session pooler do Supabase vira Transaction pooler (6543); outros hosts ficam como estão', async () => {
+    const { preferTransactionPooler, parseDatabaseUrl, describeDatabaseError } = await import('../server/neon-runtime.ts');
+    const session = preferTransactionPooler(parseDatabaseUrl('postgresql://postgres.abc:S3nha@aws-0-sa-east-1.pooler.supabase.com:5432/postgres'));
+    assert.equal(session.port, '6543');
+    assert.equal(session.hostname, 'aws-0-sa-east-1.pooler.supabase.com');
+    assert.equal(session.password, 'S3nha');
+    assert.equal(preferTransactionPooler(parseDatabaseUrl('postgresql://postgres.abc:S3nha@aws-0-sa-east-1.pooler.supabase.com:6543/postgres')).port, '6543');
+    assert.equal(preferTransactionPooler(parseDatabaseUrl('postgresql://u:p@ep-x.neon.tech:5432/db')).port, '5432');
+    assert.match(describeDatabaseError({ code: 'XX000' }), /limite de conexões/);
+});

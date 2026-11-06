@@ -1421,11 +1421,19 @@ function parseDatabaseUrl(rawValue) {
     throw new Error("DATABASE_URL inv\xE1lida: confira host e porta (ex.: aws-0-<regi\xE3o>.pooler.supabase.com:5432)");
   }
 }
+function preferTransactionPooler(url) {
+  if (url.hostname.endsWith(".pooler.supabase.com") && (url.port === "5432" || url.port === "")) {
+    const transactionUrl = new URL(url.toString());
+    transactionUrl.port = "6543";
+    return transactionUrl;
+  }
+  return url;
+}
 function createDatabasePool(databaseUrl) {
-  const parsedUrl = parseDatabaseUrl(databaseUrl);
+  const parsedUrl = preferTransactionPooler(parseDatabaseUrl(databaseUrl));
   for (const parameter of ["sslmode", "sslcert", "sslkey", "sslrootcert"])
     parsedUrl.searchParams.delete(parameter);
-  return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true, ca: databaseCertificateAuthorities(parsedUrl.hostname) }, max: 3, connectionTimeoutMillis: 8e3, query_timeout: 8e3, idleTimeoutMillis: 1e4 });
+  return new Pool({ connectionString: parsedUrl.toString(), ssl: { rejectUnauthorized: true, ca: databaseCertificateAuthorities(parsedUrl.hostname) }, max: 3, connectionTimeoutMillis: 8e3, query_timeout: 8e3, idleTimeoutMillis: 5e3 });
 }
 function databaseCertificateAuthorities(hostname) {
   const authorities = [...tls.rootCertificates];
@@ -1446,8 +1454,8 @@ function describeDatabaseError(error) {
     return `endere\xE7o do banco inacess\xEDvel (${code}); no Supabase use a connection string do pooler (Session ou Transaction pooler), n\xE3o a direta`;
   if (["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET"].includes(code))
     return `banco n\xE3o respondeu (${code}); confira se o projeto est\xE1 ativo`;
-  if (code === "53300" || code === "XX000")
-    return `banco recusou a conex\xE3o (${code}); confira limites e status do projeto`;
+  if (code === "53300" || code === "XX000" || code === "EMAXCONNSESSION" || code === "08P01")
+    return `limite de conex\xF5es do banco atingido (${code}); use o Transaction pooler (porta 6543) do Supabase`;
   return code ? `falha ao conectar (${code})` : "falha ao conectar";
 }
 async function initializeDatabase(pool) {
@@ -1659,7 +1667,8 @@ function createServerlessHandler(loadRuntime2, runInBackground = runOnVercelInBa
         return;
       }
       logBackendError("Falha ao executar a rota no backend", error);
-      sendJson(response, 503, { error: "Falha ao acessar o backend. Confira DATABASE_URL e as configura\xE7\xF5es da Vercel." });
+      const hasCode = Boolean(error && typeof error === "object" && "code" in error);
+      sendJson(response, 503, { error: hasCode ? `Falha ao acessar o banco: ${describeDatabaseError(error)}. Tente de novo em instantes; se continuar, confira DATABASE_URL.` : "Falha ao acessar o backend. Tente de novo em instantes; detalhes no log da fun\xE7\xE3o na Vercel." });
     }
   };
 }
