@@ -4,6 +4,8 @@ Core de rastreio e correção de posição trazido do projeto Cooperduque, adapt
 
 ## Empresas da Multicall
 
+Na Arcoverde, todo carro com callsign começando por **5** é da Arcoverde, qualquer que seja o companyId do cadastro (`callsignPrefixes`); São Conrado e Pedra da Gávea deixam esses carros de lado. Carros numa zona da empresa com cadastro sem empresa ou de outra empresa também entram; o detalhe do ciclo lista os incluídos por prefixo ou zona.
+
 1. Configure `AUTOCAB_SUBSCRIPTION_KEY` com a chave da Multicall.
 2. Liste todas as empresas da chave: `npm run companies` (local) ou `GET /api/companies` com `Authorization: Bearer <PANEL_TOKEN>` (Vercel). A resposta traz `companies` (todas as empresas: `id` e `name`) e `selected` (o companyId resolvido para cada uma das três empresas usadas, ou o erro).
 3. Os companyId são resolvidos automaticamente pelo nome (sem diferenciar acentos e maiúsculas). Para fixá-los, preencha `AUTOCAB_COMPANY_ID_ARCOVERDE`, `AUTOCAB_COMPANY_ID_SAO_CONRADO` e `AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA`; o valor da variável tem prioridade sobre o nome.
