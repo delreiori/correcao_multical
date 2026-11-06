@@ -378,7 +378,41 @@ test('sem a regra (outras empresas) o ocupado não acompanha o GPS', async () =>
     assert.equal(lookups, 2, 'GPS só dos livres');
     repository.close();
 });
-test('configuração padrão liga a regra do ocupado só na Arcoverde', () => {
+test('configuração padrão: nenhuma empresa usa ocupado acompanhando o GPS (ocupado vai para FORA DE AREA)', () => {
     const { connections } = readConfiguration();
-    assert.deepEqual(connections.map(connection => [connection.id, Boolean(connection.busyFollowsGps)]), [['arcoverde', true], ['sao-conrado', false], ['pedra-da-gavea', false]]);
+    assert.ok(connections.every(connection => !connection.busyFollowsGps));
+});
+test('Arcoverde: ocupado vai para FORA DE AREA, fica lá enquanto ocupado e só sai quando fica livre', async () => {
+    const gateway = new DemoAutocabClient();
+    let gpsZone = 12;
+    let statuses = [
+        { vehicleId: 801, zoneId: 11, queuePosition: 1, status: 'BusyStreetHail', hasPenalty: false },
+        { vehicleId: 802, zoneId: 11, queuePosition: 2, status: 'Available', hasPenalty: false },
+    ];
+    gateway.listZones = async () => [{ id: 11, name: 'PA1', companyId: 1 }, { id: 12, name: 'Centro', companyId: 1 }, { id: 13, name: 'Fora de Área', companyId: 1 }];
+    gateway.listVehicles = async () => [801, 802].map(id => ({ id, callsign: String(id), companyId: 1 }));
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [{ vehicleId: 801, latitude: -22.95, longitude: -43.18 }, { vehicleId: 802, latitude: -22.9, longitude: -43.2 }];
+    gateway.findZoneByCoordinates = async (latitude: number) => latitude === -22.95 ? gpsZone : 11;
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(status => status.vehicleId === vehicleId ? { ...status, zoneId, queuePosition: position } : status);
+        return 200;
+    };
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'live');
+    const arcoverde = readConfiguration().connections.find(connection => connection.id === 'arcoverde')!;
+    const connection = { id: arcoverde.id, name: arcoverde.name, companyId: 1, driverMessages: arcoverde.driverMessages, busyFollowsGps: arcoverde.busyFollowsGps, gateway };
+    await service.runConnection(connection);
+    assert.equal(statuses.find(status => status.vehicleId === 801)?.zoneId, 13, 'ocupado foi para FORA DE AREA');
+    // Continua ocupado e andando: não sai de FORA DE AREA.
+    gpsZone = 11;
+    await service.runConnection(connection);
+    assert.equal(statuses.find(status => status.vehicleId === 801)?.zoneId, 13);
+    // Ficou livre: volta para a zona do GPS.
+    statuses = statuses.map(status => status.vehicleId === 801 ? { ...status, status: 'Available' } : status);
+    gpsZone = 12;
+    await service.runConnection(connection);
+    assert.equal(statuses.find(status => status.vehicleId === 801)?.zoneId, 12, 'livre saiu de FORA DE AREA para a zona do GPS');
+    assert.deepEqual(repository.getDashboard().changes.map(change => change.reason).reverse(), ['busy-outside', 'gps']);
+    repository.close();
 });

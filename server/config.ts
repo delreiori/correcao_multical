@@ -38,8 +38,9 @@ export interface AppConfig {
 // Empresas da Multicall corrigidas por padrão. Todas usam a mesma Subscription Key; o rastreio
 // de cada uma fica separado pelo companyId, informado na variável ou resolvido pelo nome no GET de empresas.
 export const MULTICALL_COMPANIES = [
-    // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda.
-    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, busyFollowsGps: true },
+    // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
+    // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
+    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true },
     { id: 'sao-conrado', name: 'São Conrado', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_SAO_CONRADO' },
     { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA' },
 ];
@@ -60,7 +61,7 @@ function readPositiveInteger(value: string | undefined, fallback: number): numbe
 }
 function readConnections(): ConnectionConfig[] {
     if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, busyFollowsGps: 'busyFollowsGps' in company ? company.busyFollowsGps : undefined }));
+        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
     const connectionList: unknown = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, 'utf8'));
     if (!Array.isArray(connectionList) || connectionList.length === 0)
         throw new Error('Lista de conexões vazia ou inválida');

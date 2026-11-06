@@ -140,8 +140,9 @@ o/bKiIz+Fq8=
 // server/config.ts
 import { readFileSync } from "node:fs";
 var MULTICALL_COMPANIES = [
-  // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda.
-  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, busyFollowsGps: true },
+  // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
+  // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
+  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true },
   { id: "sao-conrado", name: "S\xE3o Conrado", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_SAO_CONRADO" },
   { id: "pedra-da-gavea", name: "Pedra da G\xE1vea", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA" }
 ];
@@ -162,7 +163,7 @@ function readPositiveInteger(value, fallback) {
 }
 function readConnections() {
   if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, busyFollowsGps: "busyFollowsGps" in company ? company.busyFollowsGps : void 0 }));
+    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
   const connectionList = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, "utf8"));
   if (!Array.isArray(connectionList) || connectionList.length === 0)
     throw new Error("Lista de conex\xF5es vazia ou inv\xE1lida");
