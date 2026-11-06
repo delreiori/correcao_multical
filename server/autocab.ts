@@ -54,12 +54,19 @@ function parseReservation(value: unknown, companyId: number, requestedId?: numbe
         ...(['Advanced', 'ASAP'].includes(String(booking.bookingType)) ? { bookingType: String(booking.bookingType) } : {}),
         timingSource: requestedId === undefined ? 'search' : 'detail' };
 }
+const ZONES_CACHE_TTL_MS = 10 * 60_000;
+const ZONES_TIMEOUT_MS = 90_000;
+// Zonas desativadas/históricas ficam fora: a Autocab mantém várias com o mesmo nome (ex.: 14 "FORA D AREA").
+function isActiveZone(value: unknown) {
+    const zone = value as Record<string, unknown> | null;
+    return !(zone && typeof zone === 'object' && (zone.active === false || zone.historic === true));
+}
 function parseZone(value: unknown): Zone {
     const zone = requireObject(value);
     const name = typeof zone.name === 'string' && zone.name.trim() ? zone.name : zone.descriptor;
     if (typeof name !== 'string' || !name.trim())
         throw new AutocabRequestError('Zona sem nome ou descriptor');
-    return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId) };
+    return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId), zoneType: typeof zone.zoneType === 'string' ? zone.zoneType : null };
 }
 function parseCompany(value: unknown): Company {
     const company = requireObject(value);
@@ -111,7 +118,7 @@ export class AutocabClient implements AutocabGateway {
         this.driverMessagePath = options.driverMessagePath ?? '/vehicle/v1/vehicles/message';
         this.driverMessageFields = options.driverMessageFields ?? { urgent: true };
     }
-    private async sendRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<Response> {
+    private async sendRequest(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown, timeoutMs = this.timeoutMs): Promise<Response> {
         // Diagnostics identify the operation, never credentials, query values or response bodies.
         const operation = `${method} ${new URL(path, this.baseUrl).pathname}`;
         const headers: Record<string, string> = { 'Accept': 'application/json', 'Ocp-Apim-Subscription-Key': this.subscriptionKey };
@@ -119,7 +126,7 @@ export class AutocabClient implements AutocabGateway {
             headers['Content-Type'] = 'application/json';
         let response: Response;
         try {
-            response = await this.requestFetch(new URL(path, this.baseUrl), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(this.timeoutMs), redirect: 'error' });
+            response = await this.requestFetch(new URL(path, this.baseUrl), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
         }
         catch {
             throw new AutocabRequestError(`Falha de rede ou timeout na Autocab (${operation})`);
@@ -128,8 +135,8 @@ export class AutocabClient implements AutocabGateway {
             throw new AutocabRequestError(`Autocab respondeu HTTP ${response.status} (${operation})`, response.status);
         return response;
     }
-    private async readJson(path: string): Promise<unknown> {
-        const response = await this.sendRequest(path);
+    private async readJson(path: string, timeoutMs?: number): Promise<unknown> {
+        const response = await this.sendRequest(path, 'GET', undefined, timeoutMs);
         try {
             return await response.json();
         }
@@ -137,8 +144,8 @@ export class AutocabClient implements AutocabGateway {
             throw new AutocabRequestError('Resposta Autocab não é JSON válido');
         }
     }
-    private async readArray(path: string): Promise<unknown[]> {
-        const responseBody = await this.readJson(path);
+    private async readArray(path: string, timeoutMs?: number): Promise<unknown[]> {
+        const responseBody = await this.readJson(path, timeoutMs);
         if (!Array.isArray(responseBody))
             throw new AutocabRequestError('Resposta Autocab não é uma lista; confirme o contrato');
         return responseBody;
@@ -157,7 +164,17 @@ export class AutocabClient implements AutocabGateway {
         const companyIds = new Set([...zones, ...vehicles].map(record => record.companyId).filter(companyId => companyId !== null));
         return [...companyIds].sort((left, right) => left - right).map(id => ({ id, name: null }));
     }
-    async listZones() { return (await this.readArray('/booking/v1/zones')).map(parseZone); }
+    // A lista de zonas da Autocab é enorme (dezenas de milhares, ~40 MB, com as desativadas) e quase não
+    // muda: baixa com até 90 s, guarda só as ativas e reaproveita por 10 minutos.
+    private zonesCache: { at: number; zones: Promise<Zone[]> } | null = null;
+    async listZones(): Promise<Zone[]> {
+        if (this.zonesCache && Date.now() - this.zonesCache.at < ZONES_CACHE_TTL_MS)
+            return this.zonesCache.zones;
+        const zones = this.readArray('/booking/v1/zones', Math.max(this.timeoutMs, ZONES_TIMEOUT_MS)).then(list => list.filter(isActiveZone).map(parseZone));
+        this.zonesCache = { at: Date.now(), zones };
+        zones.catch(() => { if (this.zonesCache?.zones === zones) this.zonesCache = null; });
+        return zones;
+    }
     // Booking OpenAPI: Search v2, a read-only search despite using POST.
     // Explicit future window: do not depend on the provider's implicit search dates.
     // The ISO upper bound includes all future dates, without a 30/90-day cutoff.

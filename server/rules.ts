@@ -57,13 +57,22 @@ export function summarizeStatuses(statuses: VehicleStatus[], rules?: ZoneRules) 
     return [...counts].sort((left, right) => right[1].count - left[1].count).map(([name, entry]) => `${name} ${entry.count}${entry.busy ? ' (ocupado)' : ''}`).join(', ');
 }
 export function isProtectedZone(zone: Zone, rules: ZoneRules) {
+    // Pelo tipo da Autocab: fora de área e NAK sempre; sem GPS na regra da Arcoverde.
+    if (zone.zoneType === 'OutOfRange' || zone.zoneType === 'Nak' || (zone.zoneType === 'NoGps' && rules.allNotFreeToOutside))
+        return true;
     const zoneName = normalizeZoneName(zone.name);
     return rules.protectedZoneNames.some(protectedName => zoneName.includes(normalizeZoneName(protectedName)));
 }
 export function findOutsideZone(zones: Zone[], rules: ZoneRules): Zone | null {
     if (!rules.outsideZoneName)
         return null;
-    // outsideZoneName aceita vários nomes separados por vírgula (ex.: "FORA D AREA,FORA DE AREA").
+    // Primeiro pelo tipo da Autocab (OutOfRange): São Conrado e Pedra da Gávea chamam a zona de "Ocupado.".
+    const byType = zones.filter(zone => zone.zoneType === 'OutOfRange');
+    if (byType.length > 1)
+        throw new Error('Mais de uma zona de fora de área (OutOfRange) ativa nesta conexão/empresa');
+    if (byType.length === 1)
+        return byType[0];
+    // Sem tipo: pelo nome. outsideZoneName aceita vários nomes separados por vírgula (ex.: "FORA D AREA,FORA DE AREA").
     const acceptedNames = rules.outsideZoneName.split(',').map(name => normalizeZoneName(name)).filter(Boolean);
     const matchingZones = zones.filter(zone => acceptedNames.includes(normalizeZoneName(zone.name)));
     if (matchingZones.length > 1)

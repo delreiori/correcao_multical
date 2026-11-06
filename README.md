@@ -4,6 +4,8 @@ Core de rastreio e correção de posição trazido do projeto Cooperduque, adapt
 
 ## Empresas da Multicall
 
+A zona de fora de área de cada empresa é achada pelo tipo da Autocab (`OutOfRange`): `FORA D AREA` na Arcoverde e `Ocupado.` na São Conrado e na Pedra da Gávea; o nome (`OUTSIDE_ZONE_NAME`) só vale como reserva. Zonas desativadas/históricas da Autocab são ignoradas (a Arcoverde tem 14 "FORA D AREA" antigas) e a lista de zonas, que tem ~40 MB, é baixada com até 90 s e reaproveitada por 10 minutos. Carro da empresa parado numa zona desativada é tratado como em zona comum (ocupado vai para fora de área; livre, para a zona do GPS).
+
 Na Arcoverde, todo carro com callsign começando por **5** é da Arcoverde, qualquer que seja o companyId do cadastro (`callsignPrefixes`); São Conrado e Pedra da Gávea deixam esses carros de lado. Carros numa zona da empresa com cadastro sem empresa ou de outra empresa também entram; o detalhe do ciclo lista os incluídos por prefixo ou zona.
 
 1. Configure `AUTOCAB_SUBSCRIPTION_KEY` com a chave da Multicall.

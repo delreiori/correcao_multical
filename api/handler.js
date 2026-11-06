@@ -307,12 +307,18 @@ function parseReservation(value, companyId, requestedId) {
     timingSource: requestedId === void 0 ? "search" : "detail"
   };
 }
+var ZONES_CACHE_TTL_MS = 10 * 6e4;
+var ZONES_TIMEOUT_MS = 9e4;
+function isActiveZone(value) {
+  const zone = value;
+  return !(zone && typeof zone === "object" && (zone.active === false || zone.historic === true));
+}
 function parseZone(value) {
   const zone = requireObject(value);
   const name = typeof zone.name === "string" && zone.name.trim() ? zone.name : zone.descriptor;
   if (typeof name !== "string" || !name.trim())
     throw new AutocabRequestError("Zona sem nome ou descriptor");
-  return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId) };
+  return { id: requireIdentifier(zone.id), name, companyId: optionalIdentifier(zone.companyId), zoneType: typeof zone.zoneType === "string" ? zone.zoneType : null };
 }
 function parseCompany(value) {
   const company = requireObject(value);
@@ -364,14 +370,14 @@ var AutocabClient = class {
     this.driverMessagePath = options.driverMessagePath ?? "/vehicle/v1/vehicles/message";
     this.driverMessageFields = options.driverMessageFields ?? { urgent: true };
   }
-  async sendRequest(path, method = "GET", body) {
+  async sendRequest(path, method = "GET", body, timeoutMs = this.timeoutMs) {
     const operation = `${method} ${new URL(path, this.baseUrl).pathname}`;
     const headers = { "Accept": "application/json", "Ocp-Apim-Subscription-Key": this.subscriptionKey };
     if (body !== void 0)
       headers["Content-Type"] = "application/json";
     let response;
     try {
-      response = await this.requestFetch(new URL(path, this.baseUrl), { method, headers, body: body === void 0 ? void 0 : JSON.stringify(body), signal: AbortSignal.timeout(this.timeoutMs), redirect: "error" });
+      response = await this.requestFetch(new URL(path, this.baseUrl), { method, headers, body: body === void 0 ? void 0 : JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
     } catch {
       throw new AutocabRequestError(`Falha de rede ou timeout na Autocab (${operation})`);
     }
@@ -379,16 +385,16 @@ var AutocabClient = class {
       throw new AutocabRequestError(`Autocab respondeu HTTP ${response.status} (${operation})`, response.status);
     return response;
   }
-  async readJson(path) {
-    const response = await this.sendRequest(path);
+  async readJson(path, timeoutMs) {
+    const response = await this.sendRequest(path, "GET", void 0, timeoutMs);
     try {
       return await response.json();
     } catch {
       throw new AutocabRequestError("Resposta Autocab n\xE3o \xE9 JSON v\xE1lido");
     }
   }
-  async readArray(path) {
-    const responseBody = await this.readJson(path);
+  async readArray(path, timeoutMs) {
+    const responseBody = await this.readJson(path, timeoutMs);
     if (!Array.isArray(responseBody))
       throw new AutocabRequestError("Resposta Autocab n\xE3o \xE9 uma lista; confirme o contrato");
     return responseBody;
@@ -406,8 +412,18 @@ var AutocabClient = class {
     const companyIds = new Set([...zones, ...vehicles].map((record) => record.companyId).filter((companyId) => companyId !== null));
     return [...companyIds].sort((left, right) => left - right).map((id) => ({ id, name: null }));
   }
+  // A lista de zonas da Autocab é enorme (dezenas de milhares, ~40 MB, com as desativadas) e quase não
+  // muda: baixa com até 90 s, guarda só as ativas e reaproveita por 10 minutos.
+  zonesCache = null;
   async listZones() {
-    return (await this.readArray("/booking/v1/zones")).map(parseZone);
+    if (this.zonesCache && Date.now() - this.zonesCache.at < ZONES_CACHE_TTL_MS)
+      return this.zonesCache.zones;
+    const zones = this.readArray("/booking/v1/zones", Math.max(this.timeoutMs, ZONES_TIMEOUT_MS)).then((list) => list.filter(isActiveZone).map(parseZone));
+    this.zonesCache = { at: Date.now(), zones };
+    zones.catch(() => {
+      if (this.zonesCache?.zones === zones) this.zonesCache = null;
+    });
+    return zones;
   }
   // Booking OpenAPI: Search v2, a read-only search despite using POST.
   // Explicit future window: do not depend on the provider's implicit search dates.
@@ -847,12 +863,19 @@ function summarizeStatuses(statuses, rules) {
   return [...counts].sort((left, right) => right[1].count - left[1].count).map(([name, entry]) => `${name} ${entry.count}${entry.busy ? " (ocupado)" : ""}`).join(", ");
 }
 function isProtectedZone(zone, rules) {
+  if (zone.zoneType === "OutOfRange" || zone.zoneType === "Nak" || zone.zoneType === "NoGps" && rules.allNotFreeToOutside)
+    return true;
   const zoneName = normalizeZoneName(zone.name);
   return rules.protectedZoneNames.some((protectedName) => zoneName.includes(normalizeZoneName(protectedName)));
 }
 function findOutsideZone(zones, rules) {
   if (!rules.outsideZoneName)
     return null;
+  const byType = zones.filter((zone) => zone.zoneType === "OutOfRange");
+  if (byType.length > 1)
+    throw new Error("Mais de uma zona de fora de \xE1rea (OutOfRange) ativa nesta conex\xE3o/empresa");
+  if (byType.length === 1)
+    return byType[0];
   const acceptedNames = rules.outsideZoneName.split(",").map((name) => normalizeZoneName(name)).filter(Boolean);
   const matchingZones = zones.filter((zone) => acceptedNames.includes(normalizeZoneName(zone.name)));
   if (matchingZones.length > 1)
@@ -965,11 +988,12 @@ async function resolveCompanyId(connection, gateway) {
   if (connection.companyId !== void 0 || connection.companyName === void 0)
     return connection.companyId;
   const companies = await gateway.listCompanies();
-  const wantedName = normalizeZoneName(connection.companyName);
+  const compact = (name) => normalizeZoneName(name).replace(/[^A-Z0-9]/g, "");
+  const wantedName = compact(connection.companyName);
   const namedCompanies = companies.filter((company) => company.name !== null);
-  let matchingCompanies = namedCompanies.filter((company) => normalizeZoneName(company.name) === wantedName);
+  let matchingCompanies = namedCompanies.filter((company) => compact(company.name) === wantedName);
   if (matchingCompanies.length === 0)
-    matchingCompanies = namedCompanies.filter((company) => normalizeZoneName(company.name).includes(wantedName));
+    matchingCompanies = namedCompanies.filter((company) => compact(company.name).includes(wantedName));
   if (matchingCompanies.length !== 1) {
     const available = companies.map((company) => `${company.id}${company.name ? " " + company.name : ""}`).join(", ") || "nenhuma";
     throw new Error(`Empresa "${connection.companyName}" ${matchingCompanies.length ? "amb\xEDgua" : "n\xE3o encontrada"} no GET de empresas; configure o companyId. Dispon\xEDveis: ${available}`);
@@ -1034,7 +1058,7 @@ var CorrectionService = class {
     const [statuses, gpsPositions] = await Promise.all([gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
     if (new Set(statuses.map((status) => status.vehicleId)).size !== statuses.length)
       throw new Error("IDs de ve\xEDculos duplicados nos statuses");
-    return { zones: fleet.zones, vehicles: fleet.vehicles, statuses, gpsPositions };
+    return { zones: fleet.zones, vehicles: fleet.vehicles, statuses, gpsPositions, activeZoneIds: fleet.activeZoneIds };
   }
   // Regras da empresa: na Arcoverde todo carro não livre vai para fora de área e S/GPS é protegida.
   rulesFor(connection) {
@@ -1136,7 +1160,10 @@ var CorrectionService = class {
         if (vehicleCompanyId === void 0 && zoneCompanyIds.size > 1)
           throw new Error("V\xE1rias empresas nas zonas, mas ve\xEDculo sem companyId; configure uma conex\xE3o por empresa");
         const companyZones = snapshot.zones.filter((zone) => zone.companyId === null || vehicleCompanyId === void 0 || zone.companyId === vehicleCompanyId);
-        const currentZone = companyZones.find((zone) => zone.id === status.zoneId);
+        let currentZone = companyZones.find((zone) => zone.id === status.zoneId);
+        const ownedVehicle = vehicle.companyId === connection.companyId || claimByCallsign(connection, vehicle) === "own";
+        if (!currentZone && ownedVehicle && snapshot.activeZoneIds && !snapshot.activeZoneIds.has(status.zoneId))
+          currentZone = { id: status.zoneId, name: `zona desativada ${status.zoneId}`, companyId: companyId ?? null, zoneType: null };
         if (!currentZone)
           return skipBusy("zona de outra empresa ou desconhecida");
         if (isBusyFor(status, rules) && !connection.busyFollowsGps && isProtectedZone(currentZone, rules) && currentZone.id !== outsideZoneId)
@@ -1296,9 +1323,9 @@ var CorrectionService = class {
         }
         snapshot = await snapshotPromise;
         if (connection.companyId !== void 0)
-          snapshot = { ...snapshot, zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
+          snapshot = { ...snapshot, activeZoneIds: new Set(snapshot.zones.map((zone) => zone.id)), zones: snapshot.zones.filter((zone) => zone.companyId === null || zone.companyId === connection.companyId) };
         await this.repository.saveZones(connection.id, snapshot.zones);
-        this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId, at: Date.now() });
+        this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId, activeZoneIds: snapshot.activeZoneIds, at: Date.now() });
       }
       await this.notifyDriverQueues(connection, cycleId, snapshot, snapshot.statuses);
       if (this.mode === "live")

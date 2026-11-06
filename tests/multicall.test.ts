@@ -591,3 +591,46 @@ test('Arcoverde pega todo carro com prefixo 5, onde estiver cadastrado; as outra
     assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[36, 13], [61, 23]], 'Arcoverde leva o 5036 para FORA D AREA');
     repository.close();
 });
+test('carro da empresa parado em zona desativada vai para a zona de fora de área ativa (pelo tipo OutOfRange)', async () => {
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 18, zoneId: 37300, queuePosition: 1, status: 'BusyMeterOff', hasPenalty: false },
+        { vehicleId: 19, zoneId: 999, queuePosition: 1, status: 'BusyMeterOff', hasPenalty: false },
+    ];
+    // 37300 é uma "Fora de área" desativada (não vem na lista); 999 é zona ativa de outra empresa.
+    gateway.listZones = async () => [{ id: 37557, name: 'Ocupado.', companyId: 33, zoneType: 'OutOfRange' }, { id: 37530, name: 'Centro', companyId: 33, zoneType: 'Normal' }, { id: 999, name: 'Outra', companyId: 7, zoneType: 'Normal' }];
+    gateway.listVehicles = async () => [{ id: 18, callsign: '6018', companyId: 33 }, { id: 19, callsign: '6019', companyId: 33 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [];
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item);
+        return 200;
+    };
+    const repository = new AuditRepository(':memory:');
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 33, gateway });
+    assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[18, 37557], [19, 999]]);
+    assert.equal(repository.getDashboard().changes[0].previousZoneName, 'zona desativada 37300');
+    repository.close();
+});
+test('zonas desativadas são ignoradas e a lista de zonas é reaproveitada por 10 minutos', async () => {
+    let calls = 0;
+    const fakeFetch = (async () => { calls++; return Response.json([
+        { id: 1, name: 'FORA D AREA', companyId: 7, zoneType: 'OutOfRange', active: false, historic: true },
+        { id: 2, name: 'FORA D AREA', companyId: 7, zoneType: 'OutOfRange', active: true, historic: false },
+        { id: 3, name: 'CAJU', companyId: 7, zoneType: 'Normal', active: true, historic: false },
+    ]); }) as typeof fetch;
+    const client = new AutocabClient('https://autocab-api.azure-api.net', 'key', fakeFetch);
+    const zones = await client.listZones();
+    assert.deepEqual(zones.map(zone => [zone.id, zone.zoneType]), [[2, 'OutOfRange'], [3, 'Normal']]);
+    await client.listZones();
+    assert.equal(calls, 1);
+    const { findOutsideZone } = await import('../server/rules.ts');
+    assert.equal(findOutsideZone(zones, readConfiguration())?.id, 2);
+});
+test('nome da empresa ignora espaços: Arcoverde encontra ARCO VERDE', async () => {
+    const { resolveCompanyId } = await import('../server/correction-service.ts');
+    const gateway = new DemoAutocabClient();
+    gateway.listCompanies = async () => [{ id: 7, name: 'ARCO VERDE ' }, { id: 33, name: 'SÃO CONRADO TÁXI ' }, { id: 2, name: 'PEDRA DA GAVEA' }];
+    assert.equal(await resolveCompanyId({ id: 'a', name: 'Arcoverde', companyName: 'Arcoverde', gateway }, gateway), 7);
+    assert.equal(await resolveCompanyId({ id: 's', name: 'São Conrado', companyName: 'São Conrado', gateway }, gateway), 33);
+});

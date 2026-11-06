@@ -25,12 +25,14 @@ export async function resolveCompanyId(connection: CorrectionConnection, gateway
     if (connection.companyId !== undefined || connection.companyName === undefined)
         return connection.companyId;
     const companies = await gateway.listCompanies();
-    const wantedName = normalizeZoneName(connection.companyName);
+    // Sem acentos, maiúsculas, espaços e pontuação: "Arcoverde" encontra "ARCO VERDE ".
+    const compact = (name: string) => normalizeZoneName(name).replace(/[^A-Z0-9]/g, '');
+    const wantedName = compact(connection.companyName);
     const namedCompanies = companies.filter(company => company.name !== null);
     // Nome exato primeiro; senão aceita um único nome que contenha o configurado (ex.: "Arcoverde Táxi").
-    let matchingCompanies = namedCompanies.filter(company => normalizeZoneName(company.name!) === wantedName);
+    let matchingCompanies = namedCompanies.filter(company => compact(company.name!) === wantedName);
     if (matchingCompanies.length === 0)
-        matchingCompanies = namedCompanies.filter(company => normalizeZoneName(company.name!).includes(wantedName));
+        matchingCompanies = namedCompanies.filter(company => compact(company.name!).includes(wantedName));
     if (matchingCompanies.length !== 1) {
         const available = companies.map(company => `${company.id}${company.name ? ' ' + company.name : ''}`).join(', ') || 'nenhuma';
         throw new Error(`Empresa "${connection.companyName}" ${matchingCompanies.length ? 'ambígua' : 'não encontrada'} no GET de empresas; configure o companyId. Disponíveis: ${available}`);
@@ -90,7 +92,7 @@ export class CorrectionService {
         const [statuses, gpsPositions] = await Promise.all([gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
         if (new Set(statuses.map(status => status.vehicleId)).size !== statuses.length)
             throw new Error('IDs de veículos duplicados nos statuses');
-        return { zones: fleet.zones, vehicles: fleet.vehicles, statuses, gpsPositions };
+        return { zones: fleet.zones, vehicles: fleet.vehicles, statuses, gpsPositions, activeZoneIds: fleet.activeZoneIds };
     }
     // Regras da empresa: na Arcoverde todo carro não livre vai para fora de área e S/GPS é protegida.
     private rulesFor(connection: CorrectionConnection): ZoneRules {
@@ -199,7 +201,12 @@ export class CorrectionService {
                 if (vehicleCompanyId === undefined && zoneCompanyIds.size > 1)
                     throw new Error('Várias empresas nas zonas, mas veículo sem companyId; configure uma conexão por empresa');
                 const companyZones = snapshot.zones.filter(zone => zone.companyId === null || vehicleCompanyId === undefined || zone.companyId === vehicleCompanyId);
-                const currentZone = companyZones.find(zone => zone.id === status.zoneId);
+                let currentZone = companyZones.find(zone => zone.id === status.zoneId);
+                // Carro da empresa parado numa zona desativada (que não está entre as ativas de nenhuma
+                // empresa): trata como uma zona comum, para o ocupado ir para fora de área e o livre para a zona do GPS.
+                const ownedVehicle = vehicle.companyId === connection.companyId || claimByCallsign(connection, vehicle) === 'own';
+                if (!currentZone && ownedVehicle && snapshot.activeZoneIds && !snapshot.activeZoneIds.has(status.zoneId))
+                    currentZone = { id: status.zoneId, name: `zona desativada ${status.zoneId}`, companyId: companyId ?? null, zoneType: null };
                 if (!currentZone)
                     return skipBusy('zona de outra empresa ou desconhecida');
                 if (isBusyFor(status, rules) && !connection.busyFollowsGps && isProtectedZone(currentZone, rules) && currentZone.id !== outsideZoneId)
@@ -288,7 +295,7 @@ export class CorrectionService {
         }
     }
     // Última leitura de zonas/veículos por conexão, reaproveitada pela passada rápida entre passadas.
-    private lastFleets = new Map<string, { zones: Zone[]; vehicles: Vehicle[]; companyId?: number; at: number }>();
+    private lastFleets = new Map<string, { zones: Zone[]; vehicles: Vehicle[]; companyId?: number; activeZoneIds?: Set<number>; at: number }>();
     private messagesSent = 0;
     private async notifyDriverQueues(connection: CorrectionConnection, cycleId: string, snapshot: { zones: Zone[]; vehicles: Vehicle[] }, statuses: VehicleStatus[]) {
         if (!connection.driverMessages || connection.companyId === undefined || !connection.gateway)
@@ -365,9 +372,9 @@ export class CorrectionService {
                 snapshot = await snapshotPromise;
                 // Com várias empresas na mesma chave, cada conexão guarda e usa somente as zonas da sua empresa.
                 if (connection.companyId !== undefined)
-                    snapshot = { ...snapshot, zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
+                    snapshot = { ...snapshot, activeZoneIds: new Set(snapshot.zones.map(zone => zone.id)), zones: snapshot.zones.filter(zone => zone.companyId === null || zone.companyId === connection.companyId) };
                 await this.repository.saveZones(connection.id, snapshot.zones);
-                this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId, at: Date.now() });
+                this.lastFleets.set(connection.id, { zones: snapshot.zones, vehicles: snapshot.vehicles, companyId: connection.companyId, activeZoneIds: snapshot.activeZoneIds, at: Date.now() });
             }
             // Avisa as mudanças de fila já vistas na leitura, antes da correção por GPS (que demora).
             await this.notifyDriverQueues(connection, cycleId, snapshot, snapshot.statuses);

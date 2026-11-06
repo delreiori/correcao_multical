@@ -4,6 +4,8 @@ export interface Zone {
     id: number;
     name: string;
     companyId: number | null;
+    // Tipo da zona na Autocab: Normal, OutOfRange (fora de área), Nak, NoGps, LongBreak, Rejected, Start.
+    zoneType?: string | null;
 }
 export interface Company {
     id: number;
@@ -34,6 +36,8 @@ export interface FleetSnapshot {
     vehicles: Vehicle[];
     statuses: VehicleStatus[];
     gpsPositions: VehicleGpsPosition[];
+    // IDs de todas as zonas ativas (de todas as empresas), para reconhecer carro parado em zona desativada.
+    activeZoneIds?: Set<number>;
 }
 export interface PlannedChange {
     vehicleId: number;
