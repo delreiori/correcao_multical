@@ -433,8 +433,11 @@ test('qualquer ocupação conta como ocupado; só Clear é livre e fora de servi
         assert.ok(isBusy(status(name)), name);
     for (const name of ['Clear', 'Available', 'Livre'])
         assert.ok(!isBusy(status(name)) && isAvailable(status(name)), name);
-    for (const name of ['NotWorking', 'OnBreak', 'Suspended'])
-        assert.ok(isBusy(status(name)) && !isAvailable(status(name)), `${name}: todo não livre vai para fora de área`);
+    const { isNotFree, isBusyFor } = await import('../server/rules.ts');
+    for (const name of ['NotWorking', 'OnBreak', 'Suspended']) {
+        assert.ok(!isBusy(status(name)) && !isAvailable(status(name)), `${name}: regra padrão não conta como ocupado`);
+        assert.ok(isNotFree(status(name)) && isBusyFor(status(name), { protectedZoneNames: [], outsideZoneName: '', allNotFreeToOutside: true }), `${name}: na Arcoverde vai para fora de área`);
+    }
     assert.ok(isBusy(status('Clear', { atPickup: true })), 'indo buscar passageiro');
     assert.ok(isBusy(status('Clear', { dispatchInProgress: true })), 'despacho em andamento');
     const previous = { free: process.env.FREE_STATUSES, busy: process.env.BUSY_STATUSES };
@@ -503,7 +506,7 @@ test('envio sem confirmação trava o carro só por 2 minutos e o detalhe mostra
     assert.deepEqual(changes.map(change => change.outcome), ['confirmed', 'failed']);
     repository.close();
 });
-test('todos que não estão livres vão para FORA D AREA, menos NAK e sem sinal de GPS', async () => {
+test('Arcoverde: todos que não estão livres vão para FORA D AREA, menos NAK e sem sinal de GPS; outras empresas seguem a regra padrão', async () => {
     const gateway = new DemoAutocabClient();
     let statuses = [
         { vehicleId: 1, zoneId: 11, queuePosition: 1, status: 'BusyMeterOnFromClear', hasPenalty: false },
@@ -523,8 +526,19 @@ test('todos que não estão livres vão para FORA D AREA, menos NAK e sem sinal 
         return 200;
     };
     const repository = new AuditRepository(':memory:');
-    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, gateway });
+    const initial = structuredClone(statuses);
+    const arcoverde = readConfiguration().connections.find(connection => connection.id === 'arcoverde')!;
+    assert.equal(arcoverde.allNotFreeToOutside, true);
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, allNotFreeToOutside: arcoverde.allNotFreeToOutside, gateway });
     assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[1, 13], [2, 13], [3, 11], [4, 14], [5, 15], [6, 11], [7, 11]]);
+    // Outra empresa (sem a regra): fora de serviço fica na zona e S/GPS não é protegida.
+    const saoConrado = readConfiguration().connections.find(connection => connection.id === 'sao-conrado')!;
+    assert.ok(!saoConrado.allNotFreeToOutside);
+    statuses = initial;
+    const otherRepository = new AuditRepository(':memory:');
+    await new CorrectionService(otherRepository, readConfiguration(), 'live').runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 1, gateway });
+    assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[1, 13], [2, 11], [3, 11], [4, 14], [5, 13], [6, 13], [7, 13]]);
+    otherRepository.close();
     assert.match(repository.getDashboard().cycles[0].detail ?? '', /ocupados sem mover: .*5004 \(zona protegida NAK\).*5005 \(zona protegida S\/GPS\).*5006 \(status NoGps\).*5007 \(status NAK\)/);
     repository.close();
 });

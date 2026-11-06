@@ -90,9 +90,9 @@ O GET de zonas não recebe filtro não documentado: armazena as zonas retornadas
 ## Regras
 
 1. `penalty != null`: veículo não é alterado.
-2. **Todo veículo que não está livre vai para a zona de fora de área** (`FORA D AREA`/`FORA DE AREA`, em `OUTSIDE_ZONE_NAME`) e só sai quando fica livre. Livre é só `Clear` (status de livre da Autocab); qualquer outro status conta (Busy*, corrida de rua, oferta, quase livre, fora de serviço, pausa), e também `atPickup`/`dispatchInProgress`. Ficam de fora: quem está nas zonas NAK ou S/GPS (sem sinal de GPS) ou com status NAK/GPS, e carros com penalidade. `FREE_STATUSES` e `BUSY_STATUSES` ajustam tipos exatos; o detalhe de cada ciclo mostra os tipos recebidos e os que não foram movidos, com o motivo.
+2. **Na Arcoverde, todo veículo que não está livre vai para a zona de fora de área** (`FORA D AREA`/`FORA DE AREA`, em `OUTSIDE_ZONE_NAME`) e só sai quando fica livre. Livre é só `Clear` (status de livre da Autocab); qualquer outro status conta (Busy*, corrida de rua, oferta, quase livre, fora de serviço, pausa), e também `atPickup`/`dispatchInProgress`. Ficam de fora: quem está nas zonas NAK ou S/GPS (sem sinal de GPS) ou com status NAK/GPS, e carros com penalidade. Nas outras empresas, fora de serviço/pausa não conta como ocupado e S/GPS não é protegida (opção `allNotFreeToOutside` por empresa). `FREE_STATUSES` e `BUSY_STATUSES` ajustam tipos exatos; o detalhe de cada ciclo mostra os tipos recebidos e os que não foram movidos, com o motivo.
 3. Veículo não ocupado com GPS válido é direcionado à zona calculada pela Autocab.
-4. `PROTECTED_ZONES=NAK,FORA DE AREA,FORA D AREA,S/GPS,SEM GPS`: a correção por GPS não entra nessas zonas nem retira veículos delas, exceto quando um veículo livre sai de FORA DE AREA.
+4. `PROTECTED_ZONES=NAK,FORA DE AREA,FORA D AREA` (na Arcoverde, também S/GPS): a correção por GPS não entra nessas zonas nem retira veículos delas, exceto quando um veículo livre sai de FORA DE AREA.
 5. A zona de fora de área é resolvida por nome exato normalizado dentro da empresa. Ausência ou ambiguidade interrompe o planejamento. Definir `OUTSIDE_ZONE_NAME=` desativa a regra dos ocupados.
 6. Sempre envia position: maior entre a posição máxima e a quantidade de veículos na zona, mais um. Envios sequenciais e reservas locais evitam atribuir a mesma posição aos veículos do mesmo ciclo.
 

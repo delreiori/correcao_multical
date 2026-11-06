@@ -9,6 +9,8 @@ export interface ConnectionConfig {
     driverMessages?: boolean;
     // Ocupado acompanha a zona do GPS e não segura posição à frente dos livres (Arcoverde).
     busyFollowsGps?: boolean;
+    // Todo carro não livre vai para fora de área, menos NAK e sem GPS (Arcoverde).
+    allNotFreeToOutside?: boolean;
 }
 export type DriverMessagesMode = 'off' | 'dry' | 'live';
 export interface AppConfig {
@@ -40,7 +42,7 @@ export interface AppConfig {
 export const MULTICALL_COMPANIES = [
     // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
     // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true },
+    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, allNotFreeToOutside: true },
     { id: 'sao-conrado', name: 'São Conrado', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_SAO_CONRADO' },
     { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA' },
 ];
@@ -61,7 +63,7 @@ function readPositiveInteger(value: string | undefined, fallback: number): numbe
 }
 function readConnections(): ConnectionConfig[] {
     if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
+        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: 'allNotFreeToOutside' in company && company.allNotFreeToOutside === true ? true : undefined }));
     const connectionList: unknown = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, 'utf8'));
     if (!Array.isArray(connectionList) || connectionList.length === 0)
         throw new Error('Lista de conexões vazia ou inválida');
@@ -84,6 +86,8 @@ function readConnections(): ConnectionConfig[] {
             throw new Error('driverMessages deve ser true ou false');
         if (connection.busyFollowsGps !== undefined && typeof connection.busyFollowsGps !== 'boolean')
             throw new Error('busyFollowsGps deve ser true ou false');
+        if (connection.allNotFreeToOutside !== undefined && typeof connection.allNotFreeToOutside !== 'boolean')
+            throw new Error('allNotFreeToOutside deve ser true ou false');
         identifiers.add(connection.id);
         return connection as unknown as ConnectionConfig;
     });
@@ -140,7 +144,7 @@ export function readConfiguration(): AppConfig {
         throw new Error('Configure PANEL_TOKEN para acesso remoto');
     return { mode: mode as OperatingMode, baseUrl: process.env.AUTOCAB_BASE_URL || 'https://autocab-api.azure-api.net', databasePath: process.env.DATABASE_PATH || 'data/autocab.sqlite', host, port: readPositiveInteger(process.env.PORT, 3001), panelToken,
         intervalMs: Math.max(5000, readPositiveInteger(process.env.CYCLE_INTERVAL_MS, 60000)), autoStart: process.env.AUTO_START !== 'false',
-        protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA,FORA D AREA,S/GPS,SEM GPS').split(',').map(name => name.trim()).filter(Boolean),
+        protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA,FORA D AREA').split(',').map(name => name.trim()).filter(Boolean),
         // Nomes aceitos para a zona de fora de área, separados por vírgula (a Arcoverde usa "FORA D AREA").
         outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA D AREA,FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',

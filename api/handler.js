@@ -142,7 +142,7 @@ import { readFileSync } from "node:fs";
 var MULTICALL_COMPANIES = [
   // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
   // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true },
+  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, allNotFreeToOutside: true },
   { id: "sao-conrado", name: "S\xE3o Conrado", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_SAO_CONRADO" },
   { id: "pedra-da-gavea", name: "Pedra da G\xE1vea", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA" }
 ];
@@ -163,7 +163,7 @@ function readPositiveInteger(value, fallback) {
 }
 function readConnections() {
   if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
+    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: "allNotFreeToOutside" in company && company.allNotFreeToOutside === true ? true : void 0 }));
   const connectionList = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, "utf8"));
   if (!Array.isArray(connectionList) || connectionList.length === 0)
     throw new Error("Lista de conex\xF5es vazia ou inv\xE1lida");
@@ -186,6 +186,8 @@ function readConnections() {
       throw new Error("driverMessages deve ser true ou false");
     if (connection.busyFollowsGps !== void 0 && typeof connection.busyFollowsGps !== "boolean")
       throw new Error("busyFollowsGps deve ser true ou false");
+    if (connection.allNotFreeToOutside !== void 0 && typeof connection.allNotFreeToOutside !== "boolean")
+      throw new Error("allNotFreeToOutside deve ser true ou false");
     identifiers.add(connection.id);
     return connection;
   });
@@ -242,7 +244,7 @@ function readConfiguration() {
     panelToken,
     intervalMs: Math.max(5e3, readPositiveInteger(process.env.CYCLE_INTERVAL_MS, 6e4)),
     autoStart: process.env.AUTO_START !== "false",
-    protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA,FORA D AREA,S/GPS,SEM GPS").split(",").map((name) => name.trim()).filter(Boolean),
+    protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA,FORA D AREA").split(",").map((name) => name.trim()).filter(Boolean),
     // Nomes aceitos para a zona de fora de área, separados por vírgula (a Arcoverde usa "FORA D AREA").
     outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? "FORA D AREA,FORA DE AREA",
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
@@ -807,7 +809,7 @@ function isOffDuty(status) {
   const name = normalizeStatusName(status.status);
   return OFF_DUTY_PATTERN.test(name) && !statusList("BUSY_STATUSES").has(name);
 }
-function isBusy(status) {
+function isNotFree(status) {
   if (status.atPickup || status.dispatchInProgress)
     return true;
   const name = normalizeStatusName(status.status);
@@ -815,16 +817,22 @@ function isBusy(status) {
     return true;
   return !(statusList("FREE_STATUSES").has(name) || FREE_STATUS_PATTERN.test(name));
 }
+function isBusy(status) {
+  return isNotFree(status) && !isOffDuty(status);
+}
+function isBusyFor(status, rules) {
+  return rules.allNotFreeToOutside ? isNotFree(status) : isBusy(status);
+}
 function isExemptFromOutside(status) {
   return /(^|[^a-z])nak([^a-z]|$)|gps/.test(normalizeStatusName(status.status));
 }
 function isAvailable(status) {
   return !isBusy(status) && !isOffDuty(status);
 }
-function summarizeStatuses(statuses) {
+function summarizeStatuses(statuses, rules) {
   const counts = /* @__PURE__ */ new Map();
   for (const status of statuses) {
-    const entry = counts.get(status.status) ?? { count: 0, busy: isBusy(status) };
+    const entry = counts.get(status.status) ?? { count: 0, busy: rules ? isBusyFor(status, rules) : isBusy(status) };
     entry.count++;
     counts.set(status.status, entry);
   }
@@ -846,8 +854,8 @@ function findOutsideZone(zones, rules) {
 function chooseTargetZone(status, currentZone, gpsZone, outsideZone, rules) {
   if (status.hasPenalty)
     return null;
-  if (isBusy(status)) {
-    if (!outsideZone || outsideZone.id === currentZone.id || isProtectedZone(currentZone, rules) || isExemptFromOutside(status))
+  if (isBusyFor(status, rules)) {
+    if (!outsideZone || outsideZone.id === currentZone.id || isProtectedZone(currentZone, rules) || rules.allNotFreeToOutside && isExemptFromOutside(status))
       return null;
     return outsideZone;
   }
@@ -1013,6 +1021,12 @@ var CorrectionService = class {
       throw new Error("IDs de ve\xEDculos duplicados nos statuses");
     return { zones: fleet.zones, vehicles: fleet.vehicles, statuses, gpsPositions };
   }
+  // Regras da empresa: na Arcoverde todo carro não livre vai para fora de área e S/GPS é protegida.
+  rulesFor(connection) {
+    if (!connection.allNotFreeToOutside)
+      return this.rules;
+    return { ...this.rules, allNotFreeToOutside: true, protectedZoneNames: [...this.rules.protectedZoneNames, "S/GPS", "SEM GPS"] };
+  }
   async loadSnapshot(gateway) {
     const [zones, vehicles, statuses, gpsPositions] = await Promise.all([gateway.listZones(), gateway.listVehicles(), gateway.listVehicleStatuses(), gateway.listGpsPositions()]);
     if (new Set(zones.map((zone) => zone.id)).size !== zones.length)
@@ -1031,6 +1045,7 @@ var CorrectionService = class {
     }
   }
   async planChanges(connection, snapshot, gateway) {
+    const rules = this.rulesFor(connection);
     const blockedChanges = await this.repository.listUnresolvedChanges(connection.id);
     const blockedVehicles = new Set(blockedChanges.map((change) => change.vehicleId));
     const reservedQueuePositions = /* @__PURE__ */ new Map();
@@ -1048,16 +1063,16 @@ var CorrectionService = class {
       statusesToInspect = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId === connection.companyId);
       this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} ve\xEDculos da empresa de ${snapshot.statuses.length} retornados`);
       if (statusesToInspect.length > 0)
-        this.notes.push(`status: ${summarizeStatuses(statusesToInspect)}`);
+        this.notes.push(`status: ${summarizeStatuses(statusesToInspect, rules)}`);
       if (withoutCompany > 0)
         this.notes.push(`${withoutCompany} ve\xEDculos sem companyId ignorados`);
     }
     const companyId = connection.companyId;
-    const outsideZoneMissing = companyId !== void 0 && this.rules.outsideZoneName !== "" && findOutsideZone(snapshot.zones, this.rules) === null;
+    const outsideZoneMissing = companyId !== void 0 && rules.outsideZoneName !== "" && findOutsideZone(snapshot.zones, rules) === null;
     if (outsideZoneMissing)
-      this.notes.push(`zona ${this.rules.outsideZoneName} n\xE3o existe nesta empresa; ocupados n\xE3o s\xE3o movidos`);
+      this.notes.push(`zona ${rules.outsideZoneName} n\xE3o existe nesta empresa; ocupados n\xE3o s\xE3o movidos`);
     const zoneCompanyIds = new Set(snapshot.zones.map((zone) => zone.companyId).filter((zoneCompanyId) => zoneCompanyId !== null));
-    const outsideZoneId = companyId !== void 0 ? findOutsideZone(snapshot.zones, this.rules)?.id : void 0;
+    const outsideZoneId = companyId !== void 0 ? findOutsideZone(snapshot.zones, rules)?.id : void 0;
     const hasOutsideZone = outsideZoneId !== void 0;
     const busyNotMoved = [];
     const gpsByVehicle = new Map(snapshot.gpsPositions.map((position) => [position.vehicleId, position]));
@@ -1069,7 +1084,7 @@ var CorrectionService = class {
       const chunk = statusesToInspect.slice(start, start + GPS_LOOKUP_CONCURRENCY);
       const candidates = await Promise.all(chunk.map(async (status) => {
         const skipBusy = (reason) => {
-          if (isBusy(status) && !connection.busyFollowsGps && hasOutsideZone && status.zoneId !== outsideZoneId)
+          if (isBusyFor(status, rules) && !connection.busyFollowsGps && hasOutsideZone && status.zoneId !== outsideZoneId)
             busyNotMoved.push(`${vehiclesById.get(status.vehicleId)?.callsign ?? status.vehicleId} (${reason})`);
           return null;
         };
@@ -1089,12 +1104,12 @@ var CorrectionService = class {
         const currentZone = companyZones.find((zone) => zone.id === status.zoneId);
         if (!currentZone)
           return skipBusy("zona de outra empresa ou desconhecida");
-        if (isBusy(status) && !connection.busyFollowsGps && isProtectedZone(currentZone, this.rules) && currentZone.id !== outsideZoneId)
+        if (isBusyFor(status, rules) && !connection.busyFollowsGps && isProtectedZone(currentZone, rules) && currentZone.id !== outsideZoneId)
           skipBusy(`zona protegida ${currentZone.name}`);
-        else if (isBusy(status) && !connection.busyFollowsGps && isExemptFromOutside(status))
+        else if (rules.allNotFreeToOutside && isBusyFor(status, rules) && !connection.busyFollowsGps && isExemptFromOutside(status))
           skipBusy(`status ${status.status}`);
         const gpsPosition = gpsByVehicle.get(status.vehicleId);
-        const gpsZoneId = (!isBusy(status) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+        const gpsZoneId = (!isBusyFor(status, rules) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
         return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
       }));
       for (const candidate of candidates) {
@@ -1102,8 +1117,8 @@ var CorrectionService = class {
           continue;
         const { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId } = candidate;
         const gpsZone = companyZones.find((zone) => zone.id === gpsZoneId) ?? null;
-        const followsGps = connection.busyFollowsGps && isBusy(status);
-        const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, this.rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, this.rules), this.rules);
+        const followsGps = connection.busyFollowsGps && isBusyFor(status, rules);
+        const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, rules), rules);
         if (!targetZone)
           continue;
         if (followsGps && targetZone.id === currentZone.id) {
@@ -1113,7 +1128,7 @@ var CorrectionService = class {
         }
         const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
         reservedQueuePositions.set(targetZone.id, queueTail + 1);
-        plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1, followsGps ? "busy-gps" : void 0));
+        plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1, followsGps ? "busy-gps" : isBusyFor(status, rules) ? "busy-outside" : "gps"));
       }
       this.inspectedCount += chunk.length;
       await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
@@ -1154,7 +1169,7 @@ var CorrectionService = class {
       return;
     }
     const latestStatus = latestStatuses.find((status) => status.vehicleId === change.vehicleId);
-    const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason !== "gps") : true;
+    const busyStateChanged = latestStatus ? isBusyFor(latestStatus, this.rulesFor(connection)) !== (change.reason !== "gps") : true;
     if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
       const changeId2 = await this.repository.createChange(connection.id, cycleId, this.mode, change, "skipped");
       await this.repository.finishChange(changeId2, "skipped", null, "Estado do ve\xEDculo mudou entre planejamento e envio.");
@@ -1177,7 +1192,7 @@ var CorrectionService = class {
     if (!connection.driverMessages || connection.companyId === void 0 || !connection.gateway)
       return;
     try {
-      const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+      const result = await notifyQueueChanges({ store: this.repository, gateway: connection.gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId, mode: this.mode, messagesMode: this.driverMessagesMode, zones: snapshot.zones, statuses, vehicles: snapshot.vehicles.filter((vehicle) => vehicle.companyId === connection.companyId), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
       this.messagesSent += result.messages;
       if (result.messages > 0)
         this.notes.push(`avisos de fila: ${result.zonesChanged} zonas, ${result.messages} mensagens${result.failed ? `, ${result.failed} falharam` : ""}`);
@@ -1197,7 +1212,7 @@ var CorrectionService = class {
       statusesPromise = gateway.listVehicleStatuses();
       statusesCache.set(gateway, statusesPromise);
     }
-    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${(/* @__PURE__ */ new Date()).toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter((vehicle) => vehicle.companyId === fleet.companyId), rules: this.rules, recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
+    const result = await notifyQueueChanges({ store: this.repository, gateway, connectionId: connection.id, companyName: connection.companyName ?? connection.name, cycleId: `conferencia-de-fila:${(/* @__PURE__ */ new Date()).toISOString()}`, mode: this.mode, messagesMode: this.driverMessagesMode, zones: fleet.zones, statuses: await statusesPromise, vehicles: fleet.vehicles.filter((vehicle) => vehicle.companyId === fleet.companyId), rules: this.rulesFor(connection), recipients: this.driverMessageRecipients, topDrivers: this.driverMessagesTop });
     return result.messages;
   }
   async runConnection(connection, options = {}) {
@@ -1497,7 +1512,7 @@ async function createNeonRuntime() {
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
-    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, gateway };
+    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, allNotFreeToOutside: connection.allNotFreeToOutside, gateway };
   });
   const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
   const runner = new NeonCycleRunner(repository, service, connections);
