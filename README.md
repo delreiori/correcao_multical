@@ -90,7 +90,7 @@ O GET de zonas não recebe filtro não documentado: armazena as zonas retornadas
 ## Regras
 
 1. `penalty != null`: veículo não é alterado.
-2. Veículo ocupado (`Busy*` ou status contendo `ocupad`) vai para a zona configurada em `OUTSIDE_ZONE_NAME`, salvo se já estiver nela ou numa zona protegida.
+2. Veículo ocupado (`Busy*`, inclusive `BusyMeterOnFromClear` = corrida de rua; status com street, pickup, picked up, meter on, dispatch, `ocupad`; ou um tipo listado em `BUSY_STATUSES`). O detalhe de cada ciclo mostra os tipos de status recebidos e quais contam como ocupado. vai para a zona configurada em `OUTSIDE_ZONE_NAME`, salvo se já estiver nela ou numa zona protegida.
 3. Veículo não ocupado com GPS válido é direcionado à zona calculada pela Autocab.
 4. `PROTECTED_ZONES=NAK,FORA DE AREA,FORA D AREA`: a correção por GPS não entra nessas zonas nem retira veículos delas, exceto quando um veículo livre sai de FORA DE AREA.
 5. A zona de fora de área é resolvida por nome exato normalizado dentro da empresa. Ausência ou ambiguidade interrompe o planejamento. Definir `OUTSIDE_ZONE_NAME=` desativa a regra dos ocupados.

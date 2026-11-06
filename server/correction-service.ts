@@ -1,7 +1,7 @@
 import { AutocabRequestError } from './autocab.ts';
 import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
-import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
+import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
@@ -112,6 +112,8 @@ export class CorrectionService {
             const withoutCompany = statusesToInspect.filter(status => vehiclesById.get(status.vehicleId)?.companyId == null).length;
             statusesToInspect = statusesToInspect.filter(status => vehiclesById.get(status.vehicleId)?.companyId === connection.companyId);
             this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} veículos da empresa de ${snapshot.statuses.length} retornados`);
+            if (statusesToInspect.length > 0)
+                this.notes.push(`status: ${summarizeStatuses(statusesToInspect)}`);
             if (withoutCompany > 0)
                 this.notes.push(`${withoutCompany} veículos sem companyId ignorados`);
         }

@@ -788,8 +788,22 @@ var PostgresAuditRepository = class {
 function normalizeZoneName(name) {
   return name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toUpperCase();
 }
+var BUSY_STATUS_PATTERN = /busy|ocupad|street|pick ?up|picked|meter ?on|dispatch|passenger|on ?job|hired|engaged/i;
+var extraBusyStatuses = { source: void 0, names: /* @__PURE__ */ new Set() };
 function isBusy(status) {
-  return /busy|ocupad/i.test(status.status);
+  const source = process.env.BUSY_STATUSES;
+  if (extraBusyStatuses.source !== source)
+    extraBusyStatuses = { source, names: new Set((source ?? "").split(",").map((name) => name.trim().toLowerCase()).filter(Boolean)) };
+  return BUSY_STATUS_PATTERN.test(status.status) || extraBusyStatuses.names.has(status.status.trim().toLowerCase());
+}
+function summarizeStatuses(statuses) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const status of statuses) {
+    const entry = counts.get(status.status) ?? { count: 0, busy: isBusy(status) };
+    entry.count++;
+    counts.set(status.status, entry);
+  }
+  return [...counts].sort((left, right) => right[1].count - left[1].count).map(([name, entry]) => `${name} ${entry.count}${entry.busy ? " (ocupado)" : ""}`).join(", ");
 }
 function isProtectedZone(zone, rules) {
   const zoneName = normalizeZoneName(zone.name);
@@ -1005,6 +1019,8 @@ var CorrectionService = class {
       const withoutCompany = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId == null).length;
       statusesToInspect = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId === connection.companyId);
       this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} ve\xEDculos da empresa de ${snapshot.statuses.length} retornados`);
+      if (statusesToInspect.length > 0)
+        this.notes.push(`status: ${summarizeStatuses(statusesToInspect)}`);
       if (withoutCompany > 0)
         this.notes.push(`${withoutCompany} ve\xEDculos sem companyId ignorados`);
     }

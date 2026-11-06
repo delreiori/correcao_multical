@@ -4,7 +4,28 @@ export interface ZoneRules {
     outsideZoneName: string;
 }
 export function normalizeZoneName(name: string) { return name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase(); }
-export function isBusy(status: VehicleStatus) { return /busy|ocupad/i.test(status.status); }
+// Ocupado: os tipos Busy* da Autocab (BusyMeterOnFromClear é a corrida de rua/street booking) e nomes
+// equivalentes de corrida de rua, passageiro a bordo ou despacho. BUSY_STATUSES acrescenta outros
+// tipos exatos, separados por vírgula, sem mudar o código.
+const BUSY_STATUS_PATTERN = /busy|ocupad|street|pick ?up|picked|meter ?on|dispatch|passenger|on ?job|hired|engaged/i;
+let extraBusyStatuses: { source: string | undefined; names: Set<string> } = { source: undefined, names: new Set() };
+export function isBusy(status: VehicleStatus) {
+    const source = process.env.BUSY_STATUSES;
+    if (extraBusyStatuses.source !== source)
+        extraBusyStatuses = { source, names: new Set((source ?? '').split(',').map(name => name.trim().toLowerCase()).filter(Boolean)) };
+    return BUSY_STATUS_PATTERN.test(status.status) || extraBusyStatuses.names.has(status.status.trim().toLowerCase());
+}
+// Resumo dos tipos de status da empresa (ex.: "Clear 40, BusyMeterOnFromClear 3 (ocupado)"), para
+// conferir no painel como a Autocab informa cada situação.
+export function summarizeStatuses(statuses: VehicleStatus[]) {
+    const counts = new Map<string, { count: number; busy: boolean }>();
+    for (const status of statuses) {
+        const entry = counts.get(status.status) ?? { count: 0, busy: isBusy(status) };
+        entry.count++;
+        counts.set(status.status, entry);
+    }
+    return [...counts].sort((left, right) => right[1].count - left[1].count).map(([name, entry]) => `${name} ${entry.count}${entry.busy ? ' (ocupado)' : ''}`).join(', ');
+}
 export function isProtectedZone(zone: Zone, rules: ZoneRules) {
     const zoneName = normalizeZoneName(zone.name);
     return rules.protectedZoneNames.some(protectedName => zoneName.includes(normalizeZoneName(protectedName)));

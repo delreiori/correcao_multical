@@ -426,3 +426,20 @@ test('zona de fora de área aceita "FORA D AREA" (Arcoverde) e "FORA DE AREA"', 
     assert.ok(isProtectedZone({ id: 2, name: 'FORA D AREA', companyId: 1 }, configuration));
     assert.throws(() => findOutsideZone([{ id: 2, name: 'FORA D AREA', companyId: 1 }, { id: 3, name: 'FORA DE AREA', companyId: 1 }], configuration), /ambígua/);
 });
+test('corrida de rua e variações contam como ocupado; BUSY_STATUSES acrescenta tipos', async () => {
+    const { isBusy, summarizeStatuses } = await import('../server/rules.ts');
+    const status = (name: string) => ({ vehicleId: 1, zoneId: 1, queuePosition: 1, status: name, hasPenalty: false });
+    for (const name of ['BusyMeterOnFromClear', 'StreetPickup', 'Street Booking', 'PickedUp', 'MeterOn', 'BusyMeterOff', 'Dispatched', 'Ocupado (Corrida de Rua)'])
+        assert.ok(isBusy(status(name)), name);
+    for (const name of ['Clear', 'NotWorking', 'Available'])
+        assert.ok(!isBusy(status(name)), name);
+    const previous = process.env.BUSY_STATUSES;
+    try {
+        process.env.BUSY_STATUSES = 'Rua, OnTheWay';
+        assert.ok(isBusy(status('Rua')) && isBusy(status('onTheWay')));
+    } finally {
+        if (previous === undefined) delete process.env.BUSY_STATUSES; else process.env.BUSY_STATUSES = previous;
+    }
+    assert.ok(!isBusy(status('Rua')));
+    assert.equal(summarizeStatuses([status('Clear'), status('Clear'), status('StreetPickup')]), 'Clear 2, StreetPickup 1 (ocupado)');
+});

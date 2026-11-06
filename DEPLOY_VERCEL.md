@@ -38,6 +38,7 @@ Em Settings → Environment Variables configure para Production:
 | `DRIVER_MESSAGES_ONLY` | Opcional: restringe quem recebe os avisos a callsigns/IDs separados por vírgula (ex.: `5013`). Vazio = todos |
 | `AUTOCAB_DRIVER_MESSAGE_FIELDS` | Opcional: campos extras para enviar como urgente, em JSON (padrão `{"urgent":true}`) |
 | `AUTOCAB_DRIVER_MESSAGE_PATH` | Opcional: endpoint de mensagem ao motorista (padrão `/vehicle/v1/vehicles/message`, da Vehicle API) |
+| `BUSY_STATUSES` | Opcional: tipos de status extras tratados como ocupado, exatos e separados por vírgula (o detalhe de cada ciclo mostra os tipos recebidos) |
 | `AUTOCAB_MODE` | `dry` para validar consultas e planos sem mover veículos |
 
 Crie os tokens em um gerenciador de senhas ou com `openssl rand -hex 32` na sua máquina. Não coloque valores em arquivos versionados, mensagens ou URLs. Digite somente PANEL_TOKEN no campo de senha do painel. A chave Autocab e a conexão Neon ficam no backend. O `.env` local não substitui as variáveis da Vercel.
