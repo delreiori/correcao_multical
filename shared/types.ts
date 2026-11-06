@@ -40,7 +40,7 @@ export interface PlannedChange {
     targetZoneId: number;
     targetZoneName: string;
     position: number;
-    reason: 'gps' | 'busy-outside';
+    reason: 'gps' | 'busy-outside' | 'busy-gps';
     latitude: number | null;
     longitude: number | null;
 }

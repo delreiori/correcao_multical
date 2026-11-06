@@ -7,6 +7,8 @@ export interface ConnectionConfig {
     companyId?: number;
     companyName?: string;
     driverMessages?: boolean;
+    // Ocupado acompanha a zona do GPS e não segura posição à frente dos livres (Arcoverde).
+    busyFollowsGps?: boolean;
 }
 export type DriverMessagesMode = 'off' | 'dry' | 'live';
 export interface AppConfig {
@@ -37,7 +39,7 @@ export interface AppConfig {
 // de cada uma fica separado pelo companyId, informado na variável ou resolvido pelo nome no GET de empresas.
 export const MULTICALL_COMPANIES = [
     // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda.
-    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true },
+    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, busyFollowsGps: true },
     { id: 'sao-conrado', name: 'São Conrado', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_SAO_CONRADO' },
     { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA' },
 ];
@@ -58,7 +60,7 @@ function readPositiveInteger(value: string | undefined, fallback: number): numbe
 }
 function readConnections(): ConnectionConfig[] {
     if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
+        return MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, busyFollowsGps: 'busyFollowsGps' in company ? company.busyFollowsGps : undefined }));
     const connectionList: unknown = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, 'utf8'));
     if (!Array.isArray(connectionList) || connectionList.length === 0)
         throw new Error('Lista de conexões vazia ou inválida');
@@ -79,6 +81,8 @@ function readConnections(): ConnectionConfig[] {
             throw new Error('companyName inválido');
         if (connection.driverMessages !== undefined && typeof connection.driverMessages !== 'boolean')
             throw new Error('driverMessages deve ser true ou false');
+        if (connection.busyFollowsGps !== undefined && typeof connection.busyFollowsGps !== 'boolean')
+            throw new Error('busyFollowsGps deve ser true ou false');
         identifiers.add(connection.id);
         return connection as unknown as ConnectionConfig;
     });

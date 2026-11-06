@@ -15,6 +15,15 @@ Em cada ciclo as três empresas rodam, cada uma com uma parte do tempo do ciclo,
 
 Aplicação com Node.js 24+, TypeScript, React e PostgreSQL/Neon na Vercel; SQLite continua disponível para uso local sem DATABASE_URL. Veja [o guia de deploy](DEPLOY_VERCEL.md). Integra os endpoints presentes no `plot-zona-core.js` fornecido. Consulta zonas, GPS, status e veículos; calcula mudanças; registra intenção, envio e confirmação no banco. O frontend é somente de acompanhamento, com atualização a cada 5 segundos.
 
+## Ocupado acompanha a zona (Arcoverde)
+
+Na Arcoverde, o motorista ocupado (inclusive em corrida de rua) não fica preso na zona e na posição onde ligou o ocupado:
+
+- Se o GPS mostra que ele está em outra zona, ele é plotado nessa zona, no fim da fila.
+- Se continua na mesma zona mas está à frente de motoristas livres, é recuado para o fim da fila dessa zona (no máximo uma vez por minuto por carro, caso a Autocab não aplique a posição).
+- Zonas protegidas (NAK, FORA DE AREA) não entram nem saem por essa regra; carro com penalidade não é mexido.
+- No histórico aparece como "Ocupado acompanha a zona". As outras empresas seguem a regra antiga (ocupado vai para FORA DE AREA). Para ligar em outra empresa, marque `busyFollowsGps: true` nela em `MULTICALL_COMPANIES` ou no arquivo de conexões.
+
 ## Avisos de fila aos motoristas (Arcoverde)
 
 Na Arcoverde, quando a posição de um motorista livre na fila de uma zona muda (pelo sistema ou não), esse motorista recebe uma mensagem urgente da central com a própria posição e a fila atualizada, por exemplo: `ARCOVERDE - Fila Praia atualizada. Você é o 2º. 1º A2 | 2º A1 | 3º A7`. Regras:

@@ -141,7 +141,7 @@ o/bKiIz+Fq8=
 import { readFileSync } from "node:fs";
 var MULTICALL_COMPANIES = [
   // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda.
-  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true },
+  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, busyFollowsGps: true },
   { id: "sao-conrado", name: "S\xE3o Conrado", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_SAO_CONRADO" },
   { id: "pedra-da-gavea", name: "Pedra da G\xE1vea", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA" }
 ];
@@ -162,7 +162,7 @@ function readPositiveInteger(value, fallback) {
 }
 function readConnections() {
   if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages }));
+    return MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, busyFollowsGps: "busyFollowsGps" in company ? company.busyFollowsGps : void 0 }));
   const connectionList = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, "utf8"));
   if (!Array.isArray(connectionList) || connectionList.length === 0)
     throw new Error("Lista de conex\xF5es vazia ou inv\xE1lida");
@@ -183,6 +183,8 @@ function readConnections() {
       throw new Error("companyName inv\xE1lido");
     if (connection.driverMessages !== void 0 && typeof connection.driverMessages !== "boolean")
       throw new Error("driverMessages deve ser true ou false");
+    if (connection.busyFollowsGps !== void 0 && typeof connection.busyFollowsGps !== "boolean")
+      throw new Error("busyFollowsGps deve ser true ou false");
     identifiers.add(connection.id);
     return connection;
   });
@@ -813,13 +815,26 @@ function chooseTargetZone(status, currentZone, gpsZone, outsideZone, rules) {
     return null;
   return gpsZone;
 }
+function chooseBusyFollowZone(status, currentZone, gpsZone, statuses, rules) {
+  if (status.hasPenalty || !isBusy(status))
+    return null;
+  const targetZone = gpsZone ?? currentZone;
+  if (isProtectedZone(currentZone, rules) || isProtectedZone(targetZone, rules))
+    return null;
+  if (targetZone.id !== currentZone.id)
+    return targetZone;
+  if (status.queuePosition === null)
+    return null;
+  const holdsPositionAheadOfFree = statuses.some((other) => other.zoneId === currentZone.id && other.vehicleId !== status.vehicleId && !isBusy(other) && (other.queuePosition ?? 0) > status.queuePosition);
+  return holdsPositionAheadOfFree ? currentZone : null;
+}
 function calculateQueueTail(statuses, zoneId) {
   const zoneStatuses = statuses.filter((status) => status.zoneId === zoneId);
   const highestPosition = zoneStatuses.reduce((highest, status) => Math.max(highest, status.queuePosition ?? 0), 0);
   return Math.max(highestPosition, zoneStatuses.length);
 }
-function describeChange(status, currentZone, targetZone, callsign, gpsPosition, position) {
-  return { vehicleId: status.vehicleId, callsign, previousZoneId: currentZone.id, previousZoneName: currentZone.name, targetZoneId: targetZone.id, targetZoneName: targetZone.name, position, reason: isBusy(status) ? "busy-outside" : "gps", latitude: gpsPosition?.latitude ?? null, longitude: gpsPosition?.longitude ?? null };
+function describeChange(status, currentZone, targetZone, callsign, gpsPosition, position, reason = isBusy(status) ? "busy-outside" : "gps") {
+  return { vehicleId: status.vehicleId, callsign, previousZoneId: currentZone.id, previousZoneName: currentZone.name, targetZoneId: targetZone.id, targetZoneName: targetZone.name, position, reason, latitude: gpsPosition?.latitude ?? null, longitude: gpsPosition?.longitude ?? null };
 }
 
 // server/driver-messages.ts
@@ -932,6 +947,7 @@ var CorrectionService = class {
     this.reservationMessagesMode = reservationMessagesMode;
   }
   zoneLookups = /* @__PURE__ */ new Map();
+  busyRequeuedAt = /* @__PURE__ */ new Map();
   // Só consulta a Autocab quando o carro se moveu desde a última consulta; parado no ponto, reaproveita.
   async lookupZone(gateway, vehicleId, latitude, longitude, companyId) {
     const key = `${companyId ?? ""}:${vehicleId}:${latitude.toFixed(4)}:${longitude.toFixed(4)}`;
@@ -1015,7 +1031,7 @@ var CorrectionService = class {
         if (!currentZone)
           return null;
         const gpsPosition = gpsByVehicle.get(status.vehicleId);
-        const gpsZoneId = !isBusy(status) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+        const gpsZoneId = (!isBusy(status) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
         return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
       }));
       for (const candidate of candidates) {
@@ -1023,12 +1039,18 @@ var CorrectionService = class {
           continue;
         const { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId } = candidate;
         const gpsZone = companyZones.find((zone) => zone.id === gpsZoneId) ?? null;
-        const targetZone = chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, this.rules), this.rules);
+        const followsGps = connection.busyFollowsGps && isBusy(status);
+        const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, this.rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, this.rules), this.rules);
         if (!targetZone)
           continue;
+        if (followsGps && targetZone.id === currentZone.id) {
+          if (Date.now() - (this.busyRequeuedAt.get(status.vehicleId) ?? 0) < 6e4)
+            continue;
+          this.busyRequeuedAt.set(status.vehicleId, Date.now());
+        }
         const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
         reservedQueuePositions.set(targetZone.id, queueTail + 1);
-        plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1));
+        plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1, followsGps ? "busy-gps" : void 0));
       }
       this.inspectedCount += chunk.length;
       await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
@@ -1067,7 +1089,7 @@ var CorrectionService = class {
       return;
     }
     const latestStatus = latestStatuses.find((status) => status.vehicleId === change.vehicleId);
-    const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason === "busy-outside") : true;
+    const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason !== "gps") : true;
     if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
       const changeId2 = await this.repository.createChange(connection.id, cycleId, this.mode, change, "skipped");
       await this.repository.finishChange(changeId2, "skipped", null, "Estado do ve\xEDculo mudou entre planejamento e envio.");
@@ -1402,7 +1424,7 @@ async function createNeonRuntime() {
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
-    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, gateway };
+    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, gateway };
   });
   const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
   const runner = new NeonCycleRunner(repository, service, connections);

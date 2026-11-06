@@ -318,3 +318,67 @@ test('conferência de fila usa 2 s e passada rápida 5 s por padrão; ambas acei
     assert.equal(readFastPassIntervalMs(undefined), 5000);
     assert.equal(readFastPassIntervalMs('0'), 0);
 });
+// Arcoverde com ocupado de rua: 701 ocupado em PA1 pos. 1, 702 e 703 livres atrás; zona Centro (12) vazia.
+function createBusyStreetRide(busyGpsZone: number) {
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 701, zoneId: 11, queuePosition: 1, status: 'BusyStreetHail', hasPenalty: false },
+        { vehicleId: 702, zoneId: 11, queuePosition: 2, status: 'Available', hasPenalty: false },
+        { vehicleId: 703, zoneId: 11, queuePosition: 3, status: 'Available', hasPenalty: false },
+    ];
+    gateway.listZones = async () => [{ id: 11, name: 'PA1', companyId: 1 }, { id: 12, name: 'Centro', companyId: 1 }];
+    gateway.listVehicles = async () => [701, 702, 703].map(id => ({ id, callsign: String(id), companyId: 1 }));
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [{ vehicleId: 701, latitude: -22.95, longitude: -43.18 }, { vehicleId: 702, latitude: -22.9, longitude: -43.2 }, { vehicleId: 703, latitude: -22.9, longitude: -43.2 }];
+    gateway.findZoneByCoordinates = async (latitude: number) => latitude === -22.95 ? busyGpsZone : 11;
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(status => status.vehicleId === vehicleId ? { ...status, zoneId, queuePosition: position } : status);
+        return 200;
+    };
+    return { gateway, setStatuses: (next: typeof statuses) => { statuses = next; }, statuses: () => statuses };
+}
+test('Arcoverde: ocupado de rua acompanha a zona do GPS e vai para o fim da fila', async () => {
+    const { gateway } = createBusyStreetRide(12);
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'live');
+    await service.runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, busyFollowsGps: true, gateway });
+    const changes = repository.getDashboard().changes;
+    assert.deepEqual(changes.map(change => [change.vehicleId, change.previousZoneName, change.targetZoneName, change.reason, change.outcome]), [[701, 'PA1', 'Centro', 'busy-gps', 'confirmed']]);
+    repository.close();
+});
+test('Arcoverde: ocupado de rua na mesma zona não segura a posição à frente dos livres', async () => {
+    const { gateway, setStatuses, statuses } = createBusyStreetRide(11);
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'live');
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, busyFollowsGps: true, gateway };
+    await service.runConnection(connection);
+    const [change] = repository.getDashboard().changes;
+    assert.equal(change.vehicleId, 701);
+    assert.equal(change.targetZoneName, 'PA1');
+    assert.equal(change.position, 4, 'vai para depois do último da fila');
+    // Já atrás de todos os livres: não mexe mais.
+    assert.equal(statuses().find(status => status.vehicleId === 701)?.queuePosition, 4);
+    await service.runConnection(connection);
+    assert.equal(repository.getDashboard().changes.length, 1);
+    // Se a Autocab não aplicar a posição, não insiste a cada passada (no máximo 1x por minuto).
+    setStatuses(statuses().map(status => status.vehicleId === 701 ? { ...status, queuePosition: 1 } : status));
+    await service.runConnection(connection);
+    assert.equal(repository.getDashboard().changes.length, 1);
+    repository.close();
+});
+test('sem a regra (outras empresas) o ocupado não acompanha o GPS', async () => {
+    const { gateway } = createBusyStreetRide(12);
+    let lookups = 0;
+    const lookup = gateway.findZoneByCoordinates.bind(gateway);
+    gateway.findZoneByCoordinates = async (...args) => { lookups++; return lookup(...args); };
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, rules, 'live');
+    await service.runConnection({ id: 'sao-conrado', name: 'São Conrado', companyId: 1, gateway });
+    assert.ok(!repository.getDashboard().changes.some(change => change.vehicleId === 701));
+    assert.equal(lookups, 2, 'GPS só dos livres');
+    repository.close();
+});
+test('configuração padrão liga a regra do ocupado só na Arcoverde', () => {
+    const { connections } = readConfiguration();
+    assert.deepEqual(connections.map(connection => [connection.id, Boolean(connection.busyFollowsGps)]), [['arcoverde', true], ['sao-conrado', false], ['pedra-da-gavea', false]]);
+});

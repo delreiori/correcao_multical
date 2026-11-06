@@ -1,7 +1,7 @@
 import { AutocabRequestError } from './autocab.ts';
 import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
-import { chooseTargetZone, findOutsideZone, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
+import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
@@ -13,6 +13,7 @@ export interface CorrectionConnection {
     companyId?: number;
     companyName?: string;
     driverMessages?: boolean;
+    busyFollowsGps?: boolean;
     gateway: AutocabGateway | null;
 }
 // Resolve o companyId pelo nome da empresa no GET de empresas. Nunca segue sem empresa definida:
@@ -55,6 +56,7 @@ export class CorrectionService {
     private driverMessagesTop: number | null;
     constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off', driverMessageRecipients: string[] | null = null, driverMessagesTop: number | null = null, reservationMessagesMode: DriverMessagesMode = 'off') { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; this.driverMessageRecipients = driverMessageRecipients; this.driverMessagesTop = driverMessagesTop; this.reservationMessagesMode = reservationMessagesMode; }
     private zoneLookups = new Map<string, { zoneId: number | null; at: number }>();
+    private busyRequeuedAt = new Map<number, number>();
     // Só consulta a Autocab quando o carro se moveu desde a última consulta; parado no ponto, reaproveita.
     private async lookupZone(gateway: AutocabGateway, vehicleId: number, latitude: number, longitude: number, companyId?: number) {
         const key = `${companyId ?? ''}:${vehicleId}:${latitude.toFixed(4)}:${longitude.toFixed(4)}`;
@@ -140,7 +142,7 @@ export class CorrectionService {
                 if (!currentZone)
                     return null;
                 const gpsPosition = gpsByVehicle.get(status.vehicleId);
-                const gpsZoneId = !isBusy(status) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+                const gpsZoneId = (!isBusy(status) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
                 return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
             }));
             for (const candidate of candidates) {
@@ -148,12 +150,20 @@ export class CorrectionService {
                     continue;
                 const { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId } = candidate;
                 const gpsZone = companyZones.find(zone => zone.id === gpsZoneId) ?? null;
-                const targetZone = chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, this.rules), this.rules);
+                const followsGps = connection.busyFollowsGps && isBusy(status);
+                const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, this.rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, this.rules), this.rules);
                 if (!targetZone)
                     continue;
+                // Mesma zona (só recuar para o fim da fila): no máximo uma vez por minuto por carro, caso a
+                // Autocab não aplique a posição e o carro continue à frente.
+                if (followsGps && targetZone.id === currentZone.id) {
+                    if (Date.now() - (this.busyRequeuedAt.get(status.vehicleId) ?? 0) < 60_000)
+                        continue;
+                    this.busyRequeuedAt.set(status.vehicleId, Date.now());
+                }
                 const queueTail = Math.max(calculateQueueTail(snapshot.statuses, targetZone.id), reservedQueuePositions.get(targetZone.id) ?? 0);
                 reservedQueuePositions.set(targetZone.id, queueTail + 1);
-                plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1));
+                plannedChanges.push(describeChange(status, currentZone, targetZone, vehicle.callsign, gpsPosition, queueTail + 1, followsGps ? 'busy-gps' : undefined));
             }
             this.inspectedCount += chunk.length;
             await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
@@ -193,7 +203,7 @@ export class CorrectionService {
             return;
         }
         const latestStatus = latestStatuses.find(status => status.vehicleId === change.vehicleId);
-        const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason === 'busy-outside') : true;
+        const busyStateChanged = latestStatus ? isBusy(latestStatus) !== (change.reason !== 'gps') : true;
         if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
             const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'skipped');
             await this.repository.finishChange(changeId, 'skipped', null, 'Estado do veículo mudou entre planejamento e envio.');

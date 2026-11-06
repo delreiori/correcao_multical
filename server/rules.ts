@@ -32,11 +32,26 @@ export function chooseTargetZone(status: VehicleStatus, currentZone: Zone, gpsZo
         return null;
     return gpsZone;
 }
+// Arcoverde: ocupado (inclusive corrida de rua) acompanha a zona do GPS e não segura posição à frente
+// dos livres. Vai para a zona onde está; na mesma zona, só é replotado se algum livre está atrás dele.
+export function chooseBusyFollowZone(status: VehicleStatus, currentZone: Zone, gpsZone: Zone | null, statuses: VehicleStatus[], rules: ZoneRules): Zone | null {
+    if (status.hasPenalty || !isBusy(status))
+        return null;
+    const targetZone = gpsZone ?? currentZone;
+    if (isProtectedZone(currentZone, rules) || isProtectedZone(targetZone, rules))
+        return null;
+    if (targetZone.id !== currentZone.id)
+        return targetZone;
+    if (status.queuePosition === null)
+        return null;
+    const holdsPositionAheadOfFree = statuses.some(other => other.zoneId === currentZone.id && other.vehicleId !== status.vehicleId && !isBusy(other) && (other.queuePosition ?? 0) > status.queuePosition!);
+    return holdsPositionAheadOfFree ? currentZone : null;
+}
 export function calculateQueueTail(statuses: VehicleStatus[], zoneId: number): number {
     const zoneStatuses = statuses.filter(status => status.zoneId === zoneId);
     const highestPosition = zoneStatuses.reduce((highest, status) => Math.max(highest, status.queuePosition ?? 0), 0);
     return Math.max(highestPosition, zoneStatuses.length);
 }
-export function describeChange(status: VehicleStatus, currentZone: Zone, targetZone: Zone, callsign: string, gpsPosition: VehicleGpsPosition | undefined, position: number): PlannedChange {
-    return { vehicleId: status.vehicleId, callsign, previousZoneId: currentZone.id, previousZoneName: currentZone.name, targetZoneId: targetZone.id, targetZoneName: targetZone.name, position, reason: isBusy(status) ? 'busy-outside' : 'gps', latitude: gpsPosition?.latitude ?? null, longitude: gpsPosition?.longitude ?? null };
+export function describeChange(status: VehicleStatus, currentZone: Zone, targetZone: Zone, callsign: string, gpsPosition: VehicleGpsPosition | undefined, position: number, reason: PlannedChange['reason'] = isBusy(status) ? 'busy-outside' : 'gps'): PlannedChange {
+    return { vehicleId: status.vehicleId, callsign, previousZoneId: currentZone.id, previousZoneName: currentZone.name, targetZoneId: targetZone.id, targetZoneName: targetZone.name, position, reason, latitude: gpsPosition?.latitude ?? null, longitude: gpsPosition?.longitude ?? null };
 }
