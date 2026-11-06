@@ -12,9 +12,11 @@ export function isProtectedZone(zone: Zone, rules: ZoneRules) {
 export function findOutsideZone(zones: Zone[], rules: ZoneRules): Zone | null {
     if (!rules.outsideZoneName)
         return null;
-    const matchingZones = zones.filter(zone => normalizeZoneName(zone.name) === normalizeZoneName(rules.outsideZoneName));
+    // outsideZoneName aceita vários nomes separados por vírgula (ex.: "FORA D AREA,FORA DE AREA").
+    const acceptedNames = rules.outsideZoneName.split(',').map(name => normalizeZoneName(name)).filter(Boolean);
+    const matchingZones = zones.filter(zone => acceptedNames.includes(normalizeZoneName(zone.name)));
     if (matchingZones.length > 1)
-        throw new Error('Zona FORA DE AREA configurada está ambígua nesta conexão/empresa');
+        throw new Error('Zona de fora de área ambígua nesta conexão/empresa: mais de uma zona com os nomes configurados');
     // Empresa sem a zona: a regra dos ocupados fica desativada, mas a correção por GPS continua.
     return matchingZones[0] ?? null;
 }

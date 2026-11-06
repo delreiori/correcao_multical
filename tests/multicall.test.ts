@@ -416,3 +416,13 @@ test('Arcoverde: ocupado vai para FORA DE AREA, fica lá enquanto ocupado e só 
     assert.deepEqual(repository.getDashboard().changes.map(change => change.reason).reverse(), ['busy-outside', 'gps']);
     repository.close();
 });
+test('zona de fora de área aceita "FORA D AREA" (Arcoverde) e "FORA DE AREA"', async () => {
+    const { findOutsideZone, isProtectedZone } = await import('../server/rules.ts');
+    const configuration = readConfiguration();
+    const arcoverde = findOutsideZone([{ id: 1, name: 'PA1', companyId: 1 }, { id: 2, name: 'FORA D AREA', companyId: 1 }], configuration);
+    assert.equal(arcoverde?.id, 2);
+    const other = findOutsideZone([{ id: 3, name: 'Fora de Área', companyId: 2 }], configuration);
+    assert.equal(other?.id, 3);
+    assert.ok(isProtectedZone({ id: 2, name: 'FORA D AREA', companyId: 1 }, configuration));
+    assert.throws(() => findOutsideZone([{ id: 2, name: 'FORA D AREA', companyId: 1 }, { id: 3, name: 'FORA DE AREA', companyId: 1 }], configuration), /ambígua/);
+});

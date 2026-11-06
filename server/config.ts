@@ -138,8 +138,9 @@ export function readConfiguration(): AppConfig {
         throw new Error('Configure PANEL_TOKEN para acesso remoto');
     return { mode: mode as OperatingMode, baseUrl: process.env.AUTOCAB_BASE_URL || 'https://autocab-api.azure-api.net', databasePath: process.env.DATABASE_PATH || 'data/autocab.sqlite', host, port: readPositiveInteger(process.env.PORT, 3001), panelToken,
         intervalMs: Math.max(5000, readPositiveInteger(process.env.CYCLE_INTERVAL_MS, 60000)), autoStart: process.env.AUTO_START !== 'false',
-        protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA').split(',').map(name => name.trim()).filter(Boolean),
-        outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA DE AREA',
+        protectedZoneNames: (process.env.PROTECTED_ZONES || 'NAK,FORA DE AREA,FORA D AREA').split(',').map(name => name.trim()).filter(Boolean),
+        // Nomes aceitos para a zona de fora de área, separados por vírgula (a Arcoverde usa "FORA D AREA").
+        outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? 'FORA D AREA,FORA DE AREA',
         companiesPath: process.env.AUTOCAB_COMPANIES_PATH || '/booking/v1/companies',
         autocabTimeoutMs: readPositiveInteger(process.env.AUTOCAB_TIMEOUT_MS, 10000),
         reservationMessagesMode: reservationMessagesMode as DriverMessagesMode,

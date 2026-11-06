@@ -242,8 +242,9 @@ function readConfiguration() {
     panelToken,
     intervalMs: Math.max(5e3, readPositiveInteger(process.env.CYCLE_INTERVAL_MS, 6e4)),
     autoStart: process.env.AUTO_START !== "false",
-    protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA").split(",").map((name) => name.trim()).filter(Boolean),
-    outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? "FORA DE AREA",
+    protectedZoneNames: (process.env.PROTECTED_ZONES || "NAK,FORA DE AREA,FORA D AREA").split(",").map((name) => name.trim()).filter(Boolean),
+    // Nomes aceitos para a zona de fora de área, separados por vírgula (a Arcoverde usa "FORA D AREA").
+    outsideZoneName: process.env.OUTSIDE_ZONE_NAME ?? "FORA D AREA,FORA DE AREA",
     companiesPath: process.env.AUTOCAB_COMPANIES_PATH || "/booking/v1/companies",
     autocabTimeoutMs: readPositiveInteger(process.env.AUTOCAB_TIMEOUT_MS, 1e4),
     reservationMessagesMode,
@@ -797,9 +798,10 @@ function isProtectedZone(zone, rules) {
 function findOutsideZone(zones, rules) {
   if (!rules.outsideZoneName)
     return null;
-  const matchingZones = zones.filter((zone) => normalizeZoneName(zone.name) === normalizeZoneName(rules.outsideZoneName));
+  const acceptedNames = rules.outsideZoneName.split(",").map((name) => normalizeZoneName(name)).filter(Boolean);
+  const matchingZones = zones.filter((zone) => acceptedNames.includes(normalizeZoneName(zone.name)));
   if (matchingZones.length > 1)
-    throw new Error("Zona FORA DE AREA configurada est\xE1 amb\xEDgua nesta conex\xE3o/empresa");
+    throw new Error("Zona de fora de \xE1rea amb\xEDgua nesta conex\xE3o/empresa: mais de uma zona com os nomes configurados");
   return matchingZones[0] ?? null;
 }
 function chooseTargetZone(status, currentZone, gpsZone, outsideZone, rules) {
