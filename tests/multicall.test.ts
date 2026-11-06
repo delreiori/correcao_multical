@@ -542,3 +542,24 @@ test('Arcoverde: todos que não estão livres vão para FORA D AREA, menos NAK e
     assert.match(repository.getDashboard().cycles[0].detail ?? '', /ocupados sem mover: .*5004 \(zona protegida NAK\).*5005 \(zona protegida S\/GPS\).*5006 \(status NoGps\).*5007 \(status NAK\)/);
     repository.close();
 });
+test('carro em zona da Arcoverde com cadastro sem empresa ou de outra empresa também vai para FORA D AREA', async () => {
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 16, zoneId: 11, queuePosition: 1, status: 'BusyMeterOnFromClear', hasPenalty: false },
+        { vehicleId: 28, zoneId: 11, queuePosition: 2, status: 'BusyMeterOff', hasPenalty: false },
+        { vehicleId: 99, zoneId: 21, queuePosition: 1, status: 'BusyMeterOff', hasPenalty: false },
+    ];
+    gateway.listZones = async () => [{ id: 11, name: 'CAJU', companyId: 1 }, { id: 13, name: 'FORA D AREA', companyId: 1 }, { id: 21, name: 'SC CENTRO', companyId: 2 }];
+    (gateway as { listVehicles: () => Promise<{ id: number; callsign: string; companyId: number | null }[]> }).listVehicles = async () => [{ id: 16, callsign: '5016', companyId: null }, { id: 28, callsign: '5028', companyId: 9 }, { id: 99, callsign: '6099', companyId: 9 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [];
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item);
+        return 200;
+    };
+    const repository = new AuditRepository(':memory:');
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 1, allNotFreeToOutside: true, gateway });
+    assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[16, 13], [28, 13], [99, 21]], 'carro em zona de outra empresa não é mexido');
+    assert.match(repository.getDashboard().cycles[0].detail ?? '', /incluídos por estarem em zona da empresa: 5016 \(sem empresa\), 5028 \(empresa 9\)/);
+    repository.close();
+});

@@ -1059,9 +1059,22 @@ var CorrectionService = class {
     const vehiclesById = new Map(snapshot.vehicles.map((vehicle) => [vehicle.id, vehicle]));
     let statusesToInspect = [...statusesAfterCursor, ...statusesBeforeCursor];
     if (connection.companyId !== void 0) {
-      const withoutCompany = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId == null).length;
-      statusesToInspect = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId === connection.companyId);
+      const ownZoneIds = new Set(snapshot.zones.filter((zone) => zone.companyId === connection.companyId).map((zone) => zone.id));
+      const byZone = [];
+      const withoutCompany = statusesToInspect.filter((status) => vehiclesById.get(status.vehicleId)?.companyId == null && !(status.zoneId !== null && ownZoneIds.has(status.zoneId))).length;
+      statusesToInspect = statusesToInspect.filter((status) => {
+        const vehicle = vehiclesById.get(status.vehicleId);
+        if (vehicle?.companyId === connection.companyId)
+          return true;
+        if (vehicle && status.zoneId !== null && ownZoneIds.has(status.zoneId)) {
+          byZone.push(`${vehicle.callsign} (${vehicle.companyId === null ? "sem empresa" : `empresa ${vehicle.companyId}`})`);
+          return true;
+        }
+        return false;
+      });
       this.notes.push(`companyId ${connection.companyId}: ${statusesToInspect.length} ve\xEDculos da empresa de ${snapshot.statuses.length} retornados`);
+      if (byZone.length > 0)
+        this.notes.push(`inclu\xEDdos por estarem em zona da empresa: ${byZone.slice(0, 15).join(", ")}${byZone.length > 15 ? ` e mais ${byZone.length - 15}` : ""}`);
       if (statusesToInspect.length > 0)
         this.notes.push(`status: ${summarizeStatuses(statusesToInspect, rules)}`);
       if (withoutCompany > 0)
