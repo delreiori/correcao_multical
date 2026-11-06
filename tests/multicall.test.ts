@@ -468,3 +468,38 @@ test('ocupados que já estão na fila hoje também vão para FORA D AREA', async
     assert.deepEqual(statuses.map(item => [item.vehicleId, item.zoneId]), [[901, 13], [902, 13], [903, 11]]);
     repository.close();
 });
+test('envio sem confirmação trava o carro só por 2 minutos e o detalhe mostra por que o ocupado não moveu', async (context) => {
+    const gateway = new DemoAutocabClient();
+    let statuses = [
+        { vehicleId: 951, zoneId: 11, queuePosition: 1, status: 'BusyMeterOnFromClear', hasPenalty: false },
+        { vehicleId: 952, zoneId: 11, queuePosition: 2, status: 'BusyMeterOff', hasPenalty: true },
+    ];
+    gateway.listZones = async () => [{ id: 11, name: 'GAVEA', companyId: 1 }, { id: 13, name: 'FORA D AREA', companyId: 1 }];
+    gateway.listVehicles = async () => [{ id: 951, callsign: '5036', companyId: 1 }, { id: 952, callsign: '5012', companyId: 1 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [];
+    let applyForReal = false;
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
+        if (applyForReal)
+            statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item);
+        return 200;
+    };
+    let now = Date.now();
+    context.mock.method(Date, 'now', () => now);
+    const repository = new AuditRepository(':memory:');
+    const service = new CorrectionService(repository, readConfiguration(), 'live');
+    const connection = { id: 'arcoverde', name: 'Arcoverde', companyId: 1, gateway };
+    // A Autocab aceita mas não aplica: fica "não confirmada" e o carro trava.
+    await service.runConnection(connection);
+    assert.equal(repository.getDashboard().changes[0].outcome, 'unconfirmed');
+    await service.runConnection(connection);
+    assert.match(repository.getDashboard().cycles[0].detail ?? '', /ocupados sem mover: 5036 \(aguardando confirmação de envio anterior\), 5012 \(com penalidade\)/);
+    // Passados 2 minutos sem confirmação, o carro é liberado e o envio é refeito.
+    now += 121_000;
+    applyForReal = true;
+    await service.runConnection(connection);
+    assert.equal(statuses.find(item => item.vehicleId === 951)?.zoneId, 13);
+    const changes = repository.getDashboard().changes;
+    assert.deepEqual(changes.map(change => change.outcome), ['confirmed', 'failed']);
+    repository.close();
+});

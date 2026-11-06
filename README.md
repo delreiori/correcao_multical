@@ -109,7 +109,7 @@ O banco guarda conexão, veículo, callsign, zona anterior/destino, posição en
 - Rejeitada: resposta HTTP 4xx do POST.
 - Ignorada: estado do veículo mudou antes do envio.
 
-Resultados incertos/não confirmados em live bloqueiam novos envios automáticos daquele veículo. Cada ciclo reconcilia pela zona atual; ao encontrar o destino, confirma. Se não confirmar, a operação permanece bloqueada para investigação; não há botão de repetição cega. Rejeições definitivas podem ser reavaliadas em ciclos posteriores. Falhas em consultas ficam nos ciclos e não são convertidas silenciosamente em listas vazias.
+Resultados incertos/não confirmados em live bloqueiam novos envios automáticos daquele veículo por até 2 minutos; sem confirmação nesse prazo, o envio fica como rejeitado e o veículo volta a ser avaliado. O detalhe do ciclo lista os ocupados que não foram para fora de área e o motivo (penalidade, aguardando confirmação, zona protegida, zona desconhecida). Cada ciclo reconcilia pela zona atual; ao encontrar o destino, confirma. Se não confirmar, a operação permanece bloqueada para investigação; não há botão de repetição cega. Rejeições definitivas podem ser reavaliadas em ciclos posteriores. Falhas em consultas ficam nos ciclos e não são convertidas silenciosamente em listas vazias.
 
 Em reinício, registros pendentes viram incertos e ciclos em andamento viram interrompidos. `data/autocab.sqlite` é persistente. O banco anterior do protótipo é preservado: a tabela antiga `changes` não é apagada, mas o novo painel usa `plot_changes`, `correction_cycles` e `autocab_zones`.
 

@@ -960,6 +960,7 @@ async function resolveCompanyId(connection, gateway) {
   return matchingCompanies[0].id;
 }
 var GPS_LOOKUP_CONCURRENCY = 16;
+var UNRESOLVED_BLOCK_MS = 12e4;
 var ZONE_LOOKUP_TTL_MS = 12e4;
 var FLEET_CACHE_TTL_MS = 6e4;
 function safeErrorMessage(error) {
@@ -1024,6 +1025,8 @@ var CorrectionService = class {
       const currentStatus = statuses.find((status) => status.vehicleId === change.vehicleId);
       if (currentStatus?.zoneId === change.targetZoneId)
         await this.repository.finishChange(change.id, "confirmed", change.httpStatus, "Zona de destino confirmada em consulta posterior; posi\xE7\xE3o na fila pode ter avan\xE7ado.");
+      else if (Date.now() - Date.parse(change.createdAt) > UNRESOLVED_BLOCK_MS)
+        await this.repository.finishChange(change.id, "failed", change.httpStatus, "Sem confirma\xE7\xE3o da zona em 2 minutos; ve\xEDculo liberado para nova tentativa.");
     }
   }
   async planChanges(connection, snapshot, gateway) {
@@ -1053,6 +1056,9 @@ var CorrectionService = class {
     if (outsideZoneMissing)
       this.notes.push(`zona ${this.rules.outsideZoneName} n\xE3o existe nesta empresa; ocupados n\xE3o s\xE3o movidos`);
     const zoneCompanyIds = new Set(snapshot.zones.map((zone) => zone.companyId).filter((zoneCompanyId) => zoneCompanyId !== null));
+    const outsideZoneId = companyId !== void 0 ? findOutsideZone(snapshot.zones, this.rules)?.id : void 0;
+    const hasOutsideZone = outsideZoneId !== void 0;
+    const busyNotMoved = [];
     const gpsByVehicle = new Map(snapshot.gpsPositions.map((position) => [position.vehicleId, position]));
     for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
       if (Date.now() > this.deadline - 15e3) {
@@ -1061,18 +1067,29 @@ var CorrectionService = class {
       }
       const chunk = statusesToInspect.slice(start, start + GPS_LOOKUP_CONCURRENCY);
       const candidates = await Promise.all(chunk.map(async (status) => {
-        if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
+        const skipBusy = (reason) => {
+          if (isBusy(status) && !connection.busyFollowsGps && hasOutsideZone && status.zoneId !== outsideZoneId)
+            busyNotMoved.push(`${vehiclesById.get(status.vehicleId)?.callsign ?? status.vehicleId} (${reason})`);
           return null;
+        };
+        if (status.hasPenalty)
+          return skipBusy("com penalidade");
+        if (status.zoneId === null)
+          return skipBusy("sem zona na Autocab");
+        if (blockedVehicles.has(status.vehicleId))
+          return skipBusy("aguardando confirma\xE7\xE3o de envio anterior");
         const vehicle = vehiclesById.get(status.vehicleId);
         if (!vehicle)
-          return null;
+          return skipBusy("fora da lista de ve\xEDculos");
         const vehicleCompanyId = companyId ?? vehicle.companyId ?? void 0;
         if (vehicleCompanyId === void 0 && zoneCompanyIds.size > 1)
           throw new Error("V\xE1rias empresas nas zonas, mas ve\xEDculo sem companyId; configure uma conex\xE3o por empresa");
         const companyZones = snapshot.zones.filter((zone) => zone.companyId === null || vehicleCompanyId === void 0 || zone.companyId === vehicleCompanyId);
         const currentZone = companyZones.find((zone) => zone.id === status.zoneId);
         if (!currentZone)
-          return null;
+          return skipBusy("zona de outra empresa ou desconhecida");
+        if (isBusy(status) && !connection.busyFollowsGps && isProtectedZone(currentZone, this.rules) && currentZone.id !== outsideZoneId)
+          skipBusy(`zona protegida ${currentZone.name}`);
         const gpsPosition = gpsByVehicle.get(status.vehicleId);
         const gpsZoneId = (!isBusy(status) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
         return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
@@ -1098,6 +1115,8 @@ var CorrectionService = class {
       this.inspectedCount += chunk.length;
       await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
     }
+    if (busyNotMoved.length > 0)
+      this.notes.push(`ocupados sem mover: ${busyNotMoved.slice(0, 15).join(", ")}${busyNotMoved.length > 15 ? ` e mais ${busyNotMoved.length - 15}` : ""}`);
     return plannedChanges;
   }
   // Uma consulta de status confirma todos os envios do lote.

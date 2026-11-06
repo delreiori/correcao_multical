@@ -1,7 +1,7 @@
 import { AutocabRequestError } from './autocab.ts';
 import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
-import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
+import { chooseBusyFollowZone, chooseTargetZone, findOutsideZone, isProtectedZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
@@ -36,6 +36,8 @@ export async function resolveCompanyId(connection: CorrectionConnection, gateway
 }
 // Consultas simultâneas de zona por GPS; mantém a carga na Autocab limitada.
 const GPS_LOOKUP_CONCURRENCY = 16;
+// Envio sem confirmação bloqueia novas tentativas no carro por no máximo 2 minutos.
+const UNRESOLVED_BLOCK_MS = 120_000;
 // Zona por GPS reaproveitada enquanto o carro não se mexe (~11 m, 4 casas decimais) por até 2 minutos.
 const ZONE_LOOKUP_TTL_MS = 120_000;
 // Zonas e veículos quase não mudam: a passada rápida reaproveita a última leitura por até 1 minuto.
@@ -92,6 +94,10 @@ export class CorrectionService {
             const currentStatus = statuses.find(status => status.vehicleId === change.vehicleId);
             if (currentStatus?.zoneId === change.targetZoneId)
                 await this.repository.finishChange(change.id, 'confirmed', change.httpStatus, 'Zona de destino confirmada em consulta posterior; posição na fila pode ter avançado.');
+            // Sem confirmação depois de 2 minutos: libera o carro para nova avaliação, senão ele ficaria
+            // travado para sempre se mudou de situação antes de a Autocab mostrar a zona nova.
+            else if (Date.now() - Date.parse(change.createdAt) > UNRESOLVED_BLOCK_MS)
+                await this.repository.finishChange(change.id, 'failed', change.httpStatus, 'Sem confirmação da zona em 2 minutos; veículo liberado para nova tentativa.');
         }
     }
     private async planChanges(connection: CorrectionConnection, snapshot: FleetSnapshot, gateway: AutocabGateway): Promise<PlannedChange[]> {
@@ -122,6 +128,9 @@ export class CorrectionService {
         if (outsideZoneMissing)
             this.notes.push(`zona ${this.rules.outsideZoneName} não existe nesta empresa; ocupados não são movidos`);
         const zoneCompanyIds = new Set(snapshot.zones.map(zone => zone.companyId).filter(zoneCompanyId => zoneCompanyId !== null));
+        const outsideZoneId = companyId !== undefined ? findOutsideZone(snapshot.zones, this.rules)?.id : undefined;
+        const hasOutsideZone = outsideZoneId !== undefined;
+        const busyNotMoved: string[] = [];
         const gpsByVehicle = new Map(snapshot.gpsPositions.map(position => [position.vehicleId, position]));
         for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
             if (Date.now() > this.deadline - 15000) {
@@ -131,18 +140,30 @@ export class CorrectionService {
             const chunk = statusesToInspect.slice(start, start + GPS_LOOKUP_CONCURRENCY);
             // Consultas de zona por GPS do lote em paralelo; a decisão segue a ordem dos veículos.
             const candidates = await Promise.all(chunk.map(async status => {
-                if (status.hasPenalty || status.zoneId === null || blockedVehicles.has(status.vehicleId))
+                // Ocupado que deveria ir para fora de área e não vai: registra o motivo no detalhe do ciclo.
+                const skipBusy = (reason: string) => {
+                    if (isBusy(status) && !connection.busyFollowsGps && hasOutsideZone && status.zoneId !== outsideZoneId)
+                        busyNotMoved.push(`${vehiclesById.get(status.vehicleId)?.callsign ?? status.vehicleId} (${reason})`);
                     return null;
+                };
+                if (status.hasPenalty)
+                    return skipBusy('com penalidade');
+                if (status.zoneId === null)
+                    return skipBusy('sem zona na Autocab');
+                if (blockedVehicles.has(status.vehicleId))
+                    return skipBusy('aguardando confirmação de envio anterior');
                 const vehicle = vehiclesById.get(status.vehicleId);
                 if (!vehicle)
-                    return null;
+                    return skipBusy('fora da lista de veículos');
                 const vehicleCompanyId = companyId ?? vehicle.companyId ?? undefined;
                 if (vehicleCompanyId === undefined && zoneCompanyIds.size > 1)
                     throw new Error('Várias empresas nas zonas, mas veículo sem companyId; configure uma conexão por empresa');
                 const companyZones = snapshot.zones.filter(zone => zone.companyId === null || vehicleCompanyId === undefined || zone.companyId === vehicleCompanyId);
                 const currentZone = companyZones.find(zone => zone.id === status.zoneId);
                 if (!currentZone)
-                    return null;
+                    return skipBusy('zona de outra empresa ou desconhecida');
+                if (isBusy(status) && !connection.busyFollowsGps && isProtectedZone(currentZone, this.rules) && currentZone.id !== outsideZoneId)
+                    skipBusy(`zona protegida ${currentZone.name}`);
                 const gpsPosition = gpsByVehicle.get(status.vehicleId);
                 const gpsZoneId = (!isBusy(status) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
                 return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
@@ -170,6 +191,8 @@ export class CorrectionService {
             this.inspectedCount += chunk.length;
             await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
         }
+        if (busyNotMoved.length > 0)
+            this.notes.push(`ocupados sem mover: ${busyNotMoved.slice(0, 15).join(', ')}${busyNotMoved.length > 15 ? ` e mais ${busyNotMoved.length - 15}` : ''}`);
         return plannedChanges;
     }
     // Uma consulta de status confirma todos os envios do lote.
