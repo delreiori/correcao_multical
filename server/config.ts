@@ -89,7 +89,8 @@ function readConnections(): ConnectionConfig[] {
     });
 }
 function readDriverMessagesMode(): DriverMessagesMode {
-    const mode = process.env.DRIVER_MESSAGES_MODE || 'dry';
+    // Ligado por padrão; só não envia de verdade no modo demo (veja notifyQueueChanges).
+    const mode = process.env.DRIVER_MESSAGES_MODE || 'live';
     if (!['off', 'dry', 'live'].includes(mode))
         throw new Error('DRIVER_MESSAGES_MODE deve ser off, dry ou live');
     return mode as DriverMessagesMode;
@@ -126,10 +127,11 @@ function readDriverMessagePath() {
     return path;
 }
 export function readConfiguration(): AppConfig {
-    const reservationMessagesMode = process.env.RESERVATION_MESSAGES_MODE || 'off';
+    const reservationMessagesMode = process.env.RESERVATION_MESSAGES_MODE || 'live';
     if (!['off', 'dry', 'live'].includes(reservationMessagesMode))
         throw new Error('RESERVATION_MESSAGES_MODE deve ser off, dry ou live');
-    const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? 'dry' : 'demo');
+    // Na Vercel corrige de verdade por padrão; fora dela (servidor local) fica em demonstração.
+    const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? 'live' : 'demo');
     if (!['demo', 'dry', 'live'].includes(mode))
         throw new Error('AUTOCAB_MODE deve ser demo, dry ou live');
     const host = process.env.HOST || '127.0.0.1';

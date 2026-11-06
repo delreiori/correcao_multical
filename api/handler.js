@@ -191,7 +191,7 @@ function readConnections() {
   });
 }
 function readDriverMessagesMode() {
-  const mode = process.env.DRIVER_MESSAGES_MODE || "dry";
+  const mode = process.env.DRIVER_MESSAGES_MODE || "live";
   if (!["off", "dry", "live"].includes(mode))
     throw new Error("DRIVER_MESSAGES_MODE deve ser off, dry ou live");
   return mode;
@@ -223,10 +223,10 @@ function readDriverMessagePath() {
   return path;
 }
 function readConfiguration() {
-  const reservationMessagesMode = process.env.RESERVATION_MESSAGES_MODE || "off";
+  const reservationMessagesMode = process.env.RESERVATION_MESSAGES_MODE || "live";
   if (!["off", "dry", "live"].includes(reservationMessagesMode))
     throw new Error("RESERVATION_MESSAGES_MODE deve ser off, dry ou live");
-  const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? "dry" : "demo");
+  const mode = process.env.AUTOCAB_MODE || (process.env.VERCEL ? "live" : "demo");
   if (!["demo", "dry", "live"].includes(mode))
     throw new Error("AUTOCAB_MODE deve ser demo, dry ou live");
   const host = process.env.HOST || "127.0.0.1";

@@ -31,7 +31,7 @@ Em Settings → Environment Variables configure para Production:
 | `CRON_SECRET` | Outro token aleatório, exclusivo do agendador (cron-job.org) |
 | `AUTOCAB_TIMEOUT_MS` | Opcional: tempo máximo de cada requisição à Autocab (padrão 10000) |
 | `CRON_REPEAT_INTERVAL_MS` | Opcional: intervalo das passadas extras dentro de cada cron (padrão 20000; 0 desliga) |
-| `DRIVER_MESSAGES_MODE` | Avisos de fila da Arcoverde: `off`, `dry` (padrão, só registra) ou `live` (envia, mesmo com AUTOCAB_MODE=dry) |
+| `DRIVER_MESSAGES_MODE` | Opcional: avisos de fila da Arcoverde. Padrão `live` (envia); `dry` só registra; `off` desliga |
 | `FAST_PASS_INTERVAL_MS` | Opcional: a cada quantos ms roda a passada rápida da Arcoverde entre as completas, que reposiciona e avisa (padrão 5000; 0 desliga) |
 | `DRIVER_MESSAGES_POLL_MS` | Opcional: a cada quantos ms a fila da Arcoverde é conferida para o aviso, com uma só leitura de status (padrão 2000; 0 desliga). As conferências seguem até 56 s de cada chamada do cron |
 | `DRIVER_MESSAGES_TOP` | Opcional: limita o aviso aos N primeiros da fila. Vazio (padrão) = todos que mudaram de posição |
@@ -39,7 +39,7 @@ Em Settings → Environment Variables configure para Production:
 | `AUTOCAB_DRIVER_MESSAGE_FIELDS` | Opcional: campos extras para enviar como urgente, em JSON (padrão `{"urgent":true}`) |
 | `AUTOCAB_DRIVER_MESSAGE_PATH` | Opcional: endpoint de mensagem ao motorista (padrão `/vehicle/v1/vehicles/message`, da Vehicle API) |
 | `FREE_STATUSES` / `BUSY_STATUSES` | Opcional: tipos de status exatos tratados como livre / ocupado, separados por vírgula. Padrão: livre é só `Clear`; o resto de quem trabalha é ocupado (o detalhe de cada ciclo mostra os tipos recebidos) |
-| `AUTOCAB_MODE` | `dry` para validar consultas e planos sem mover veículos |
+| `AUTOCAB_MODE` | Opcional: padrão `live` na Vercel (corrige de verdade). Use `dry` para só simular |
 
 Crie os tokens em um gerenciador de senhas ou com `openssl rand -hex 32` na sua máquina. Não coloque valores em arquivos versionados, mensagens ou URLs. Digite somente PANEL_TOKEN no campo de senha do painel. A chave Autocab e a conexão Neon ficam no backend. O `.env` local não substitui as variáveis da Vercel.
 
@@ -75,7 +75,7 @@ Cada passada percorre as três empresas e, em cada uma, todos os veículos daque
 ### Aviso de novas reservas para todos os motoristas da São Conrado
 
 Defina `RESERVATION_MESSAGES_MODE=live` em Production e publique o código atualizado.
-`off` (padrão) desliga o recurso; `dry` registra simulações. Esse controle é independente
+`live` (padrão) envia; `off` desliga o recurso; `dry` registra simulações. Esse controle é independente
 de `DRIVER_MESSAGES_MODE`, `DRIVER_MESSAGES_ONLY` e dos avisos de fila da Arcoverde.
 Com `AUTOCAB_MODE=dry`, os avisos de reserva em live são reais, mas as correções de zona
 continuam simuladas. `AUTOCAB_MODE=demo` nunca envia nem consulta reservas.
@@ -118,7 +118,7 @@ quando a correção de zonas falha no restante do ciclo.
 Este recurso foi validado com respostas simuladas e PostgreSQL embutido; o envio real e a
 publicação na Vercel exigem validação na implantação com as credenciais existentes.
 
-Depois de conferir os dados e planos em dry, configure `AUTOCAB_MODE=live` e faça novo deploy. O endpoint de plot passará a receber alterações reais. O POST real não foi executado durante o desenvolvimento.
+Tudo vem **ligado por padrão** na Vercel, sem precisar de variáveis: correção de zonas (`AUTOCAB_MODE` = live), avisos de fila da Arcoverde (`DRIVER_MESSAGES_MODE` = live) e avisos de reserva da São Conrado (`RESERVATION_MESSAGES_MODE` = live). Para simular sem mover carros, configure `AUTOCAB_MODE=dry`; para desligar um aviso, `off`.
 
 ## Desenvolvimento local
 
