@@ -310,12 +310,12 @@ test('avisos de zonas diferentes saem juntos, sem uma zona esperar a outra', asy
     assert.equal((repository.getDashboard().messages ?? []).length, 4);
     repository.close();
 });
-test('conferência de fila usa 2 s e passada rápida 5 s por padrão; ambas aceitam 0', async () => {
+test('conferência de fila e passada rápida usam 2 s por padrão; ambas aceitam 0', async () => {
     const { readQueuePollIntervalMs, readFastPassIntervalMs } = await import('../server/execution-limits.ts');
     assert.equal(readQueuePollIntervalMs(undefined), 2000);
     assert.equal(readQueuePollIntervalMs('0'), 0);
     assert.equal(readQueuePollIntervalMs('x'), 2000);
-    assert.equal(readFastPassIntervalMs(undefined), 5000);
+    assert.equal(readFastPassIntervalMs(undefined), 2000);
     assert.equal(readFastPassIntervalMs('0'), 0);
 });
 // Arcoverde com ocupado de rua: 701 ocupado em PA1 pos. 1, 702 e 703 livres atrás; zona Centro (12) vazia.
@@ -664,22 +664,22 @@ test('livre na PA1 com GPS na beira (dentro de 150 m) não é jogado para COPACA
     assert.equal(statuses[0].zoneId, 35877, 'a ~300 m da PA1 vai para COPACABANA');
     repository.close();
 });
-test('PA1: livre parado a poucos metros da PA1 (marcado em COPACABANA) é colocado no ponto e avisado; devolvido, volta na mesma posição', async (context) => {
+test('PA1: só marca quando entra no desenho da PA1, na hora, com aviso; perto mas fora não marca; devolvido, volta na mesma posição', async () => {
     const gateway = new DemoAutocabClient();
-    let now = Date.now();
-    context.mock.method(Date, 'now', () => now);
     const pa1 = { id: 37295, name: 'PA1', companyId: 7, zoneType: 'Normal', boundary: PA1_BOUNDARY };
     let statuses = [
         { vehicleId: 15, zoneId: 37295, queuePosition: 1, status: 'Clear', hasPenalty: false },
         { vehicleId: 4, zoneId: 37295, queuePosition: 2, status: 'Clear', hasPenalty: false },
         { vehicleId: 36, zoneId: 35877, queuePosition: 1, status: 'Clear', hasPenalty: false },
     ];
+    // 5036 começa a ~49 m da PA1, dentro da COPACABANA (posição real vista na Autocab).
+    let gps36 = { latitude: -22.96706, longitude: -43.17822 };
     gateway.listZones = async () => [pa1, { id: 35877, name: 'COPACABANA', companyId: 7, zoneType: 'Normal' }, { id: 36030, name: 'FORA D AREA', companyId: 7, zoneType: 'OutOfRange' }];
     gateway.listVehicles = async () => [{ id: 15, callsign: '5015', companyId: 7 }, { id: 4, callsign: '5004', companyId: 7 }, { id: 36, callsign: '5036', companyId: 7 }];
     gateway.listVehicleStatuses = async () => structuredClone(statuses);
-    // 5036 a ~49 m da PA1, dentro da COPACABANA (posição real vista na Autocab); os outros dentro da PA1.
-    gateway.listGpsPositions = async () => [{ vehicleId: 36, latitude: -22.96706, longitude: -43.17822 }, { vehicleId: 15, latitude: -22.964583, longitude: -43.180404 }, { vehicleId: 4, latitude: -22.964499, longitude: -43.180461 }];
-    gateway.findZoneByCoordinates = async (latitude: number) => latitude === -22.96706 ? 35877 : 37295;
+    gateway.listGpsPositions = async () => [{ vehicleId: 36, ...gps36 }, { vehicleId: 15, latitude: -22.964583, longitude: -43.180404 }, { vehicleId: 4, latitude: -22.964499, longitude: -43.180461 }];
+    let lookups = 0;
+    gateway.findZoneByCoordinates = async () => { lookups++; return 35877; };
     const plots: [number, number, number][] = [];
     gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
         plots.push([vehicleId, zoneId, position]);
@@ -688,22 +688,38 @@ test('PA1: livre parado a poucos metros da PA1 (marcado em COPACABANA) é coloca
     };
     const repository = new AuditRepository(':memory:');
     const arcoverde = readConfiguration().connections.find(connection => connection.id === 'arcoverde')!;
-    assert.deepEqual(arcoverde.pointZones, [{ name: 'PA1', radiusMeters: 80 }]);
+    assert.deepEqual(arcoverde.pointZones, [{ name: 'PA1', radiusMeters: 0 }]);
     const service = new CorrectionService(repository, readConfiguration(), 'live', 'live');
     const connection = { id: 'arcoverde', name: 'Arcoverde', companyName: 'Arcoverde', companyId: 7, allNotFreeToOutside: true, driverMessages: true, pointZones: arcoverde.pointZones, gateway };
     await service.runConnection(connection);
-    assert.equal(plots.length, 0, 'primeira vez perto do ponto: aguarda 20 s');
-    assert.match(repository.getDashboard().cycles[0].detail ?? '', /perto do ponto, aguardando 20 s parado: 5036 \(PA1\)/);
-    now += 25_000;
+    assert.equal(plots.length, 0, 'perto mas fora da PA1: não marca');
+    // Entra no desenho da PA1: marca na mesma passada, sem esperar, e calcula a zona sem perguntar à Autocab.
+    gps36 = { latitude: -22.965331944444443, longitude: -43.181255 };
+    lookups = 0;
     await service.runConnection(connection);
-    assert.deepEqual(plots, [[36, 37295, 3]], 'colocado na PA1 no fim da fila');
-    const notice = gateway.sentMessages.find(message => message.vehicleId === 36);
-    assert.equal(notice?.message, 'ARCOVERDE - Você está no PA1. Você é o 3º.');
+    assert.deepEqual(plots, [[36, 37295, 3]]);
+    assert.equal(lookups, 0, 'zona do GPS pelos contornos');
+    assert.equal(gateway.sentMessages.find(message => message.vehicleId === 36)?.message, 'ARCOVERDE - Você está no PA1. Você é o 3º.');
     // A Autocab devolve para COPACABANA e mais um carro entra na PA1: volta na posição 3, sem novo aviso.
     statuses = [...statuses.map(item => item.vehicleId === 36 ? { ...item, zoneId: 35877, queuePosition: 1 } : item), { vehicleId: 18, zoneId: 37295, queuePosition: 3, status: 'Clear', hasPenalty: false }];
-    now += 5_000;
     await service.runConnection(connection);
     assert.deepEqual(plots.at(-1), [36, 37295, 3]);
     assert.equal(gateway.sentMessages.filter(message => message.vehicleId === 36).length, 1);
+    repository.close();
+});
+test('tolerância não segura quem entrou no desenho de outra zona (PA1 colada na COPACABANA)', async () => {
+    const gateway = new DemoAutocabClient();
+    const pa1 = { id: 37295, name: 'PA1', companyId: 7, zoneType: 'Normal', boundary: PA1_BOUNDARY };
+    let statuses = [{ vehicleId: 3, zoneId: 35877, queuePosition: 1, status: 'Clear', hasPenalty: false }];
+    // COPACABANA com contorno grande ao redor; o carro está dentro da PA1 e perto (<150 m) da COPACABANA.
+    const copa = { id: 35877, name: 'COPACABANA', companyId: 7, zoneType: 'Normal', boundary: [{ latitude: -22.9675, longitude: -43.1830 }, { latitude: -22.9675, longitude: -43.1700 }, { latitude: -22.9800, longitude: -43.1700 }, { latitude: -22.9800, longitude: -43.1830 }] };
+    gateway.listZones = async () => [pa1, copa];
+    gateway.listVehicles = async () => [{ id: 3, callsign: '5003', companyId: 7 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    gateway.listGpsPositions = async () => [{ vehicleId: 3, latitude: -22.9666, longitude: -43.1815 }];
+    gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => { statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item); return 200; };
+    const repository = new AuditRepository(':memory:');
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 7, allNotFreeToOutside: true, gateway });
+    assert.equal(statuses[0].zoneId, 37295);
     repository.close();
 });

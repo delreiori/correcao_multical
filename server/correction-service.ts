@@ -1,7 +1,7 @@
 import { AutocabRequestError } from './autocab.ts';
 import type { AutocabGateway } from './autocab.ts';
 import type { AuditStore } from './audit-store.ts';
-import { chooseBusyFollowZone, chooseTargetZone, distanceToZoneMeters, findOutsideZone, isBusyFor, isExemptFromOutside, isProtectedZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
+import { chooseBusyFollowZone, chooseTargetZone, distanceToZoneMeters, findContainingZone, findOutsideZone, isBusyFor, isExemptFromOutside, isProtectedZone, summarizeStatuses, calculateQueueTail, describeChange, isBusy, normalizeZoneName } from './rules.ts';
 import type { ZoneRules } from './rules.ts';
 import type { FleetSnapshot, OperatingMode, PlannedChange, Vehicle, VehicleStatus, Zone } from '../shared/types.ts';
 import type { DriverMessagesMode } from './config.ts';
@@ -49,7 +49,7 @@ const POINT_DWELL_MS = 20_000;
 // Envio sem confirmação bloqueia novas tentativas no carro por no máximo 2 minutos.
 const UNRESOLVED_BLOCK_MS = 120_000;
 // Zona por GPS reaproveitada enquanto o carro não se mexe (~11 m, 4 casas decimais) por até 2 minutos.
-const ZONE_LOOKUP_TTL_MS = 120_000;
+const ZONE_LOOKUP_TTL_MS = 30_000;
 // Zonas e veículos quase não mudam: a passada rápida reaproveita a última leitura por até 1 minuto.
 const FLEET_CACHE_TTL_MS = 60_000;
 // Prefixo do callsign decide a empresa antes do companyId: 'own' (desta), 'other' (de outra), 'none'.
@@ -264,7 +264,11 @@ export class CorrectionService {
                 else if (rules.allNotFreeToOutside && isBusyFor(status, rules) && !connection.busyFollowsGps && isExemptFromOutside(status))
                     skipBusy(`status ${status.status}`);
                 const gpsPosition = gpsByVehicle.get(status.vehicleId);
-                const gpsZoneId = (!isBusyFor(status, rules) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+                // Zona do GPS calculada aqui pelos contornos (sem esperar a Autocab); só pergunta à Autocab
+                // quando o ponto não cai em exatamente uma zona comum da empresa.
+                const gpsZoneId = (!isBusyFor(status, rules) || connection.busyFollowsGps) && gpsPosition
+                    ? findContainingZone(gpsPosition.latitude, gpsPosition.longitude, companyZones)?.id ?? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId)
+                    : null;
                 return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
             }));
             for (const candidate of candidates) {
@@ -285,7 +289,8 @@ export class CorrectionService {
                     if (!nearSince || nearSince.zoneId !== pointZone.id)
                         this.pointNearSince.set(status.vehicleId, { zoneId: pointZone.id, at: Date.now() });
                     const recentlyPlaced = this.pointPlacements.get(status.vehicleId)?.zoneId === pointZone.id && Date.now() - (this.pointPlacements.get(status.vehicleId)?.at ?? 0) < POINT_PLACEMENT_MEMORY_MS;
-                    if (!recentlyPlaced && Date.now() - (nearSince?.zoneId === pointZone.id ? nearSince.at : Date.now()) < POINT_DWELL_MS) {
+                    const insidePoint = distanceToZoneMeters(gpsPosition!.latitude, gpsPosition!.longitude, pointZone) === 0;
+                    if (!insidePoint && !recentlyPlaced && Date.now() - (nearSince?.zoneId === pointZone.id ? nearSince.at : Date.now()) < POINT_DWELL_MS) {
                         waitingForPoint.push(`${vehicle.callsign} (${pointZone.name})`);
                         continue;
                     }
@@ -310,7 +315,8 @@ export class CorrectionService {
                 // GPS_ZONE_TOLERANCE_M do contorno dela. Evita tirar da PA1 (ponto dentro da COPACABANA) quem
                 // está parado na beira do ponto e o pula-pula entre zonas vizinhas com a oscilação do GPS.
                 // Não vale para quem sai de fora de área nem para os ocupados.
-                if (!followsGps && !isBusyFor(status, rules) && currentZone.id !== outsideZoneId && gpsPosition && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, currentZone) <= this.gpsZoneToleranceMeters) {
+                // Se o GPS já está dentro do desenho da zona de destino, marca na hora (entrou na PA1, vai para a PA1).
+                if (!followsGps && !isBusyFor(status, rules) && currentZone.id !== outsideZoneId && gpsPosition && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, targetZone) > 0 && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, currentZone) <= this.gpsZoneToleranceMeters) {
                     keptByTolerance.push(`${vehicle.callsign} (${currentZone.name})`);
                     continue;
                 }

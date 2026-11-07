@@ -130,6 +130,31 @@ export function distanceToZoneMeters(latitude: number, longitude: number, zone: 
     }
     return inside ? 0 : nearest;
 }
+// Área aproximada da zona em m² (fórmula do laço na projeção local), guardada por contorno.
+const zoneAreas = new WeakMap<object, number>();
+function zoneAreaSquareMeters(zone: Zone) {
+    const boundary = zone.boundary!;
+    let area = zoneAreas.get(boundary);
+    if (area === undefined) {
+        const latitude = boundary[0].latitude;
+        const metersPerDegreeLongitude = 111_320 * Math.cos(latitude * Math.PI / 180);
+        let sum = 0;
+        for (let index = 0, previous = boundary.length - 1; index < boundary.length; previous = index++)
+            sum += (boundary[previous].longitude * metersPerDegreeLongitude) * (boundary[index].latitude * 111_320) - (boundary[index].longitude * metersPerDegreeLongitude) * (boundary[previous].latitude * 111_320);
+        area = Math.abs(sum) / 2;
+        zoneAreas.set(boundary, area);
+    }
+    return area;
+}
+// Zona comum (não especial) que contém o ponto, pelos contornos. Como a Autocab, fica com a menor
+// (as zonas enormes NACIONAL e VIAGEM cobrem tudo). Nenhuma, ou empate: null (pergunta à Autocab).
+export function findContainingZone(latitude: number, longitude: number, zones: Zone[]): Zone | null {
+    const containing = zones.filter(zone => (zone.zoneType === 'Normal' || zone.zoneType == null) && zone.boundary && distanceToZoneMeters(latitude, longitude, zone) === 0)
+        .sort((left, right) => zoneAreaSquareMeters(left) - zoneAreaSquareMeters(right));
+    if (containing.length === 0 || (containing.length > 1 && zoneAreaSquareMeters(containing[0]) === zoneAreaSquareMeters(containing[1])))
+        return null;
+    return containing[0];
+}
 export function calculateQueueTail(statuses: VehicleStatus[], zoneId: number): number {
     const zoneStatuses = statuses.filter(status => status.zoneId === zoneId);
     const highestPosition = zoneStatuses.reduce((highest, status) => Math.max(highest, status.queuePosition ?? 0), 0);

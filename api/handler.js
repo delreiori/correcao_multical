@@ -101,7 +101,7 @@ function readInterval(value, fallback) {
   return Number.isFinite(interval) && interval >= 0 ? interval : fallback;
 }
 function readFastPassIntervalMs(value = process.env.FAST_PASS_INTERVAL_MS) {
-  return readInterval(value, 5e3);
+  return readInterval(value, 2e3);
 }
 function readQueuePollIntervalMs(value = process.env.DRIVER_MESSAGES_POLL_MS) {
   return readInterval(value, 2e3);
@@ -142,7 +142,7 @@ import { readFileSync } from "node:fs";
 var MULTICALL_COMPANIES = [
   // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
   // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ["5"], pointZones: [{ name: "PA1", radiusMeters: 80 }] },
+  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ["5"], pointZones: [{ name: "PA1", radiusMeters: 0 }] },
   { id: "sao-conrado", name: "S\xE3o Conrado", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_SAO_CONRADO" },
   { id: "pedra-da-gavea", name: "Pedra da G\xE1vea", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA" }
 ];
@@ -202,8 +202,8 @@ function readPointZones(defaults) {
     return [];
   return value.split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
     const [name, radius] = entry.split(":");
-    const radiusMeters = Number(radius ?? 80);
-    if (!name?.trim() || !Number.isFinite(radiusMeters) || radiusMeters <= 0)
+    const radiusMeters = Number(radius ?? 0);
+    if (!name?.trim() || !Number.isFinite(radiusMeters) || radiusMeters < 0)
       throw new Error('POINT_ZONES deve ser como "PA1:80,PA2:60"');
     return { name: name.trim(), radiusMeters };
   });
@@ -943,6 +943,27 @@ function distanceToZoneMeters(latitude, longitude, zone) {
   }
   return inside ? 0 : nearest;
 }
+var zoneAreas = /* @__PURE__ */ new WeakMap();
+function zoneAreaSquareMeters(zone) {
+  const boundary = zone.boundary;
+  let area = zoneAreas.get(boundary);
+  if (area === void 0) {
+    const latitude = boundary[0].latitude;
+    const metersPerDegreeLongitude = 111320 * Math.cos(latitude * Math.PI / 180);
+    let sum = 0;
+    for (let index = 0, previous = boundary.length - 1; index < boundary.length; previous = index++)
+      sum += boundary[previous].longitude * metersPerDegreeLongitude * (boundary[index].latitude * 111320) - boundary[index].longitude * metersPerDegreeLongitude * (boundary[previous].latitude * 111320);
+    area = Math.abs(sum) / 2;
+    zoneAreas.set(boundary, area);
+  }
+  return area;
+}
+function findContainingZone(latitude, longitude, zones) {
+  const containing = zones.filter((zone) => (zone.zoneType === "Normal" || zone.zoneType == null) && zone.boundary && distanceToZoneMeters(latitude, longitude, zone) === 0).sort((left, right) => zoneAreaSquareMeters(left) - zoneAreaSquareMeters(right));
+  if (containing.length === 0 || containing.length > 1 && zoneAreaSquareMeters(containing[0]) === zoneAreaSquareMeters(containing[1]))
+    return null;
+  return containing[0];
+}
 function calculateQueueTail(statuses, zoneId) {
   const zoneStatuses = statuses.filter((status) => status.zoneId === zoneId);
   const highestPosition = zoneStatuses.reduce((highest, status) => Math.max(highest, status.queuePosition ?? 0), 0);
@@ -1038,7 +1059,7 @@ var GPS_LOOKUP_CONCURRENCY = 16;
 var POINT_PLACEMENT_MEMORY_MS = 15 * 6e4;
 var POINT_DWELL_MS = 2e4;
 var UNRESOLVED_BLOCK_MS = 12e4;
-var ZONE_LOOKUP_TTL_MS = 12e4;
+var ZONE_LOOKUP_TTL_MS = 3e4;
 var FLEET_CACHE_TTL_MS = 6e4;
 function claimByCallsign(connection, vehicle) {
   if (connection.callsignPrefixes?.some((prefix) => vehicle.callsign.startsWith(prefix)))
@@ -1254,7 +1275,7 @@ var CorrectionService = class {
         else if (rules.allNotFreeToOutside && isBusyFor(status, rules) && !connection.busyFollowsGps && isExemptFromOutside(status))
           skipBusy(`status ${status.status}`);
         const gpsPosition = gpsByVehicle.get(status.vehicleId);
-        const gpsZoneId = (!isBusyFor(status, rules) || connection.busyFollowsGps) && gpsPosition ? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
+        const gpsZoneId = (!isBusyFor(status, rules) || connection.busyFollowsGps) && gpsPosition ? findContainingZone(gpsPosition.latitude, gpsPosition.longitude, companyZones)?.id ?? await this.lookupZone(gateway, status.vehicleId, gpsPosition.latitude, gpsPosition.longitude, vehicleCompanyId) : null;
         return { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId };
       }));
       for (const candidate of candidates) {
@@ -1268,7 +1289,8 @@ var CorrectionService = class {
           if (!nearSince || nearSince.zoneId !== pointZone.id)
             this.pointNearSince.set(status.vehicleId, { zoneId: pointZone.id, at: Date.now() });
           const recentlyPlaced = this.pointPlacements.get(status.vehicleId)?.zoneId === pointZone.id && Date.now() - (this.pointPlacements.get(status.vehicleId)?.at ?? 0) < POINT_PLACEMENT_MEMORY_MS;
-          if (!recentlyPlaced && Date.now() - (nearSince?.zoneId === pointZone.id ? nearSince.at : Date.now()) < POINT_DWELL_MS) {
+          const insidePoint = distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, pointZone) === 0;
+          if (!insidePoint && !recentlyPlaced && Date.now() - (nearSince?.zoneId === pointZone.id ? nearSince.at : Date.now()) < POINT_DWELL_MS) {
             waitingForPoint.push(`${vehicle.callsign} (${pointZone.name})`);
             continue;
           }
@@ -1287,7 +1309,7 @@ var CorrectionService = class {
         const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, rules), rules);
         if (!targetZone)
           continue;
-        if (!followsGps && !isBusyFor(status, rules) && currentZone.id !== outsideZoneId && gpsPosition && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, currentZone) <= this.gpsZoneToleranceMeters) {
+        if (!followsGps && !isBusyFor(status, rules) && currentZone.id !== outsideZoneId && gpsPosition && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, targetZone) > 0 && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, currentZone) <= this.gpsZoneToleranceMeters) {
           keptByTolerance.push(`${vehicle.callsign} (${currentZone.name})`);
           continue;
         }

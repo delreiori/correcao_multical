@@ -27,7 +27,9 @@ Existe ainda a opção `busyFollowsGps: true` (ocupado acompanha a zona do GPS, 
 
 ## Ponto PA1 (Arcoverde)
 
-O GPS de quem para no ponto PA1 costuma cair poucos metros fora do desenho da PA1, e a Autocab marca a zona vizinha (COPACABANA). Por isso, na Arcoverde, motorista **livre** com GPS a até **80 m** da PA1, parado ali por pelo menos 20 s, é **colocado na PA1** (fim da fila) e recebe um aviso urgente: `ARCOVERDE - Você está no PA1. Você é o 3º.` Se a Autocab devolver o carro para a COPACABANA, ele volta para a PA1 na **mesma posição**, sem novo aviso (memória de 15 minutos). Quem já está na PA1 só sai dela por GPS a mais de 150 m do contorno. `POINT_ZONES` troca os pontos e raios (ex.: `PA1:80,PA2:60`; `off` desliga). Para a Autocab parar de devolver, aumente o desenho da PA1 ou desligue "Permit Auto Plot Out" na PA1.
+Na Arcoverde, motorista **livre que entra no desenho da PA1** é marcado na PA1 na mesma passada (fim da fila) e recebe aviso urgente: `ARCOVERDE - Você está no PA1. Você é o 3º.` Perto mas fora do desenho não marca. Se a Autocab devolver o carro para a COPACABANA, ele volta para a PA1 na **mesma posição**, sem novo aviso (memória de 15 minutos). `POINT_ZONES` troca os pontos (ex.: `PA1,PA2`; com raio em metros fora do desenho, `PA1:30`; `off` desliga). Para a Autocab parar de devolver, aumente o desenho da PA1 ou desligue "Permit Auto Plot Out" nela.
+
+**Velocidade da plotagem:** a zona do GPS é calculada pelos contornos das zonas (a menor zona comum que contém o ponto, como a Autocab faz, já que NACIONAL e VIAGEM cobrem tudo), sem consultar a Autocab por carro; conferido igual à Autocab em 19 de 19 carros. A passada rápida da Arcoverde roda a cada 2 s (`FAST_PASS_INTERVAL_MS`) e leva ~0,3 s. A tolerância de 150 m só segura o livre na zona atual quando o GPS não está dentro do desenho da zona de destino.
 
 ## Avisos de fila aos motoristas (Arcoverde)
 

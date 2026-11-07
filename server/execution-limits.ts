@@ -17,7 +17,7 @@ function readInterval(value: string | undefined, fallback: number) {
     return Number.isFinite(interval) && interval >= 0 ? interval : fallback;
 }
 // Passada rápida da Arcoverde entre as completas: reposiciona por GPS e avisa (FAST_PASS_INTERVAL_MS). 0 desliga.
-export function readFastPassIntervalMs(value = process.env.FAST_PASS_INTERVAL_MS) { return readInterval(value, 5_000); }
+export function readFastPassIntervalMs(value = process.env.FAST_PASS_INTERVAL_MS) { return readInterval(value, 2_000); }
 // Conferência só de fila da Arcoverde (uma leitura de status) para o aviso sair em segundos
 // (DRIVER_MESSAGES_POLL_MS). 0 desliga.
 export function readQueuePollIntervalMs(value = process.env.DRIVER_MESSAGES_POLL_MS) { return readInterval(value, 2_000); }

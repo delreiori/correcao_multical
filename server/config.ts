@@ -15,7 +15,7 @@ export interface ConnectionConfig {
     // do cadastro (Arcoverde: "5"). As outras empresas deixam esses carros de lado.
     callsignPrefixes?: string[];
     excludeCallsignPrefixes?: string[];
-    // Zonas de ponto: livre com GPS a até radiusMeters do contorno é colocado nelas e avisado (Arcoverde: PA1).
+    // Zonas de ponto: livre com GPS dentro do contorno (ou a até radiusMeters dele) é colocado nelas e avisado (Arcoverde: PA1, só dentro).
     pointZones?: { name: string; radiusMeters: number }[];
 }
 export type DriverMessagesMode = 'off' | 'dry' | 'live';
@@ -48,7 +48,7 @@ export interface AppConfig {
 export const MULTICALL_COMPANIES = [
     // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
     // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ['5'], pointZones: [{ name: 'PA1', radiusMeters: 80 }] },
+    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ['5'], pointZones: [{ name: 'PA1', radiusMeters: 0 }] },
     { id: 'sao-conrado', name: 'São Conrado', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_SAO_CONRADO' },
     { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA' },
 ];
@@ -109,8 +109,8 @@ function readPointZones(defaults: { name: string; radiusMeters: number }[]) {
         return [];
     return value.split(',').map(entry => entry.trim()).filter(Boolean).map(entry => {
         const [name, radius] = entry.split(':');
-        const radiusMeters = Number(radius ?? 80);
-        if (!name?.trim() || !Number.isFinite(radiusMeters) || radiusMeters <= 0)
+        const radiusMeters = Number(radius ?? 0);
+        if (!name?.trim() || !Number.isFinite(radiusMeters) || radiusMeters < 0)
             throw new Error('POINT_ZONES deve ser como "PA1:80,PA2:60"');
         return { name: name.trim(), radiusMeters };
     });
