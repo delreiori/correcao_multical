@@ -15,6 +15,8 @@ export interface ConnectionConfig {
     // do cadastro (Arcoverde: "5"). As outras empresas deixam esses carros de lado.
     callsignPrefixes?: string[];
     excludeCallsignPrefixes?: string[];
+    // Zonas de ponto: livre com GPS a até radiusMeters do contorno é colocado nelas e avisado (Arcoverde: PA1).
+    pointZones?: { name: string; radiusMeters: number }[];
 }
 export type DriverMessagesMode = 'off' | 'dry' | 'live';
 export interface AppConfig {
@@ -46,7 +48,7 @@ export interface AppConfig {
 export const MULTICALL_COMPANIES = [
     // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
     // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ['5'] },
+    { id: 'arcoverde', name: 'Arcoverde', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_ARCOVERDE', driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ['5'], pointZones: [{ name: 'PA1', radiusMeters: 80 }] },
     { id: 'sao-conrado', name: 'São Conrado', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_SAO_CONRADO' },
     { id: 'pedra-da-gavea', name: 'Pedra da Gávea', companyIdEnvironmentVariable: 'AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA' },
 ];
@@ -67,7 +69,7 @@ function readPositiveInteger(value: string | undefined, fallback: number): numbe
 }
 function readConnections(): ConnectionConfig[] {
     if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-        return withPrefixExclusions(MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: 'allNotFreeToOutside' in company && company.allNotFreeToOutside === true ? true : undefined, callsignPrefixes: 'callsignPrefixes' in company ? company.callsignPrefixes : undefined })));
+        return withPrefixExclusions(MULTICALL_COMPANIES.map(company => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: 'AUTOCAB_SUBSCRIPTION_KEY', companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: 'allNotFreeToOutside' in company && company.allNotFreeToOutside === true ? true : undefined, callsignPrefixes: 'callsignPrefixes' in company ? company.callsignPrefixes : undefined, pointZones: 'pointZones' in company && company.pointZones ? readPointZones(company.pointZones) : undefined })));
     const connectionList: unknown = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, 'utf8'));
     if (!Array.isArray(connectionList) || connectionList.length === 0)
         throw new Error('Lista de conexões vazia ou inválida');
@@ -97,6 +99,21 @@ function readConnections(): ConnectionConfig[] {
         identifiers.add(connection.id);
         return connection as unknown as ConnectionConfig;
     }));
+}
+// POINT_ZONES (ex.: "PA1:80,PA2:60") troca as zonas de ponto padrão da empresa; "off" desliga.
+function readPointZones(defaults: { name: string; radiusMeters: number }[]) {
+    const value = process.env.POINT_ZONES?.trim();
+    if (!value)
+        return defaults;
+    if (value.toLowerCase() === 'off')
+        return [];
+    return value.split(',').map(entry => entry.trim()).filter(Boolean).map(entry => {
+        const [name, radius] = entry.split(':');
+        const radiusMeters = Number(radius ?? 80);
+        if (!name?.trim() || !Number.isFinite(radiusMeters) || radiusMeters <= 0)
+            throw new Error('POINT_ZONES deve ser como "PA1:80,PA2:60"');
+        return { name: name.trim(), radiusMeters };
+    });
 }
 // Cada empresa deixa de lado os carros com prefixo de callsign de outra empresa.
 function withPrefixExclusions(connections: ConnectionConfig[]): ConnectionConfig[] {

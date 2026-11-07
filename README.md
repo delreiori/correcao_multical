@@ -25,6 +25,10 @@ Motorista ocupado (inclusive em corrida de rua) é plotado na zona de fora de á
 
 Existe ainda a opção `busyFollowsGps: true` (ocupado acompanha a zona do GPS, no fim da fila), desligada em todas as empresas.
 
+## Ponto PA1 (Arcoverde)
+
+O GPS de quem para no ponto PA1 costuma cair poucos metros fora do desenho da PA1, e a Autocab marca a zona vizinha (COPACABANA). Por isso, na Arcoverde, motorista **livre** com GPS a até **80 m** da PA1, parado ali por pelo menos 20 s, é **colocado na PA1** (fim da fila) e recebe um aviso urgente: `ARCOVERDE - Você está no PA1. Você é o 3º.` Se a Autocab devolver o carro para a COPACABANA, ele volta para a PA1 na **mesma posição**, sem novo aviso (memória de 15 minutos). Quem já está na PA1 só sai dela por GPS a mais de 150 m do contorno. `POINT_ZONES` troca os pontos e raios (ex.: `PA1:80,PA2:60`; `off` desliga). Para a Autocab parar de devolver, aumente o desenho da PA1 ou desligue "Permit Auto Plot Out" na PA1.
+
 ## Avisos de fila aos motoristas (Arcoverde)
 
 Na Arcoverde, quando a posição de um motorista livre na fila de uma zona muda (pelo sistema ou não), esse motorista recebe uma mensagem urgente da central com a própria posição e a fila atualizada, por exemplo: `ARCOVERDE - Fila Praia atualizada. Você é o 2º. 1º A2 | 2º A1 | 3º A7`. Regras:

@@ -49,7 +49,9 @@ export interface PlannedChange {
     targetZoneId: number;
     targetZoneName: string;
     position: number;
-    reason: 'gps' | 'busy-outside' | 'busy-gps';
+    reason: 'gps' | 'busy-outside' | 'busy-gps' | 'point';
+    // Colocação no ponto (PA1) devolvida pela Autocab: volta na mesma posição, sem ir para o fim da fila.
+    keepPosition?: boolean;
     latitude: number | null;
     longitude: number | null;
 }

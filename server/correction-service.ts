@@ -17,6 +17,7 @@ export interface CorrectionConnection {
     allNotFreeToOutside?: boolean;
     callsignPrefixes?: string[];
     excludeCallsignPrefixes?: string[];
+    pointZones?: { name: string; radiusMeters: number }[];
     gateway: AutocabGateway | null;
 }
 // Resolve o companyId pelo nome da empresa no GET de empresas. Nunca segue sem empresa definida:
@@ -41,6 +42,10 @@ export async function resolveCompanyId(connection: CorrectionConnection, gateway
 }
 // Consultas simultâneas de zona por GPS; mantém a carga na Autocab limitada.
 const GPS_LOOKUP_CONCURRENCY = 16;
+// Colocação no ponto lembrada por 15 minutos: devolvido pela Autocab, volta na mesma posição e sem novo aviso.
+const POINT_PLACEMENT_MEMORY_MS = 15 * 60_000;
+// Tempo perto do ponto antes de colocar o carro nele (evita quem só passa de carro).
+const POINT_DWELL_MS = 20_000;
 // Envio sem confirmação bloqueia novas tentativas no carro por no máximo 2 minutos.
 const UNRESOLVED_BLOCK_MS = 120_000;
 // Zona por GPS reaproveitada enquanto o carro não se mexe (~11 m, 4 casas decimais) por até 2 minutos.
@@ -72,6 +77,47 @@ export class CorrectionService {
     constructor(repository: AuditStore, rules: ZoneRules, mode: OperatingMode, driverMessagesMode: DriverMessagesMode = 'off', driverMessageRecipients: string[] | null = null, driverMessagesTop: number | null = null, reservationMessagesMode: DriverMessagesMode = 'off') { this.repository = repository; this.rules = rules; this.mode = mode; this.driverMessagesMode = driverMessagesMode; this.driverMessageRecipients = driverMessageRecipients; this.driverMessagesTop = driverMessagesTop; this.reservationMessagesMode = reservationMessagesMode; }
     private zoneLookups = new Map<string, { zoneId: number | null; at: number }>();
     private busyRequeuedAt = new Map<number, number>();
+    // Posição em que cada carro foi colocado no ponto e quando foi avisado (para não repetir o aviso).
+    private pointPlacements = new Map<number, { zoneId: number; position: number; at: number; notifiedAt: number }>();
+    private pointNearSince = new Map<number, { zoneId: number; at: number }>();
+    private rememberPointPlacement(change: PlannedChange) {
+        const previous = this.pointPlacements.get(change.vehicleId);
+        const samePlacement = previous && previous.zoneId === change.targetZoneId && Date.now() - previous.at < POINT_PLACEMENT_MEMORY_MS;
+        this.pointPlacements.set(change.vehicleId, { zoneId: change.targetZoneId, position: samePlacement ? previous.position : change.position, at: Date.now(), notifiedAt: samePlacement ? previous.notifiedAt : 0 });
+    }
+    // Aviso urgente ao motorista colocado no ponto, uma vez por colocação (não a cada devolução da Autocab).
+    private async notifyPointPlacements(connection: CorrectionConnection, cycleId: string, changes: PlannedChange[], gateway: AutocabGateway) {
+        if (!connection.driverMessages || this.driverMessagesMode === 'off' || !this.repository.recordDriverMessage)
+            return;
+        const sendForReal = this.driverMessagesMode === 'live' && this.mode === 'live';
+        for (const change of changes.filter(item => item.reason === 'point')) {
+            if (sendForReal && !this.pointPlacements.has(change.vehicleId))
+                continue;
+            const placement = this.pointPlacements.get(change.vehicleId);
+            if (placement && placement.notifiedAt > 0 && placement.zoneId === change.targetZoneId)
+                continue;
+            if (this.driverMessageRecipients && !this.driverMessageRecipients.includes(change.callsign) && !this.driverMessageRecipients.includes(String(change.vehicleId)))
+                continue;
+            const position = placement?.position ?? change.position;
+            const message = `${(connection.companyName ?? connection.name).toUpperCase()} - Você está no ${change.targetZoneName}. Você é o ${position}º.`;
+            let outcome: 'simulated' | 'sent' | 'failed' = 'simulated', httpStatus: number | null = null;
+            if (sendForReal) {
+                try {
+                    httpStatus = await gateway.sendDriverMessage(change.vehicleId, message);
+                    outcome = 'sent';
+                }
+                catch (error) {
+                    httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+                    outcome = 'failed';
+                }
+            }
+            if (placement)
+                placement.notifiedAt = Date.now();
+            else
+                this.pointPlacements.set(change.vehicleId, { zoneId: change.targetZoneId, position, at: Date.now(), notifiedAt: Date.now() });
+            await this.repository.recordDriverMessage({ connectionId: connection.id, cycleId, vehicleId: change.vehicleId, callsign: change.callsign, zoneId: change.targetZoneId, zoneName: change.targetZoneName, queuePosition: position, message, mode: this.mode, outcome, httpStatus });
+        }
+    }
     // GPS_ZONE_TOLERANCE_M: metros além do contorno da zona atual antes de o livre ser movido por GPS.
     private gpsZoneToleranceMeters = (() => { const value = Number(process.env.GPS_ZONE_TOLERANCE_M ?? 150); return Number.isFinite(value) && value >= 0 ? value : 150; })();
     // Só consulta a Autocab quando o carro se moveu desde a última consulta; parado no ponto, reaproveita.
@@ -176,6 +222,7 @@ export class CorrectionService {
         const hasOutsideZone = outsideZoneId !== undefined;
         const busyNotMoved: string[] = [];
         const keptByTolerance: string[] = [];
+        const waitingForPoint: string[] = [];
         const gpsByVehicle = new Map(snapshot.gpsPositions.map(position => [position.vehicleId, position]));
         for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
             if (Date.now() > this.deadline - 15000) {
@@ -225,6 +272,36 @@ export class CorrectionService {
                     continue;
                 const { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId } = candidate;
                 const gpsZone = companyZones.find(zone => zone.id === gpsZoneId) ?? null;
+                // Zona de ponto (PA1): livre com GPS a poucos metros dela é colocado no ponto, mesmo que a
+                // Autocab marque a zona vizinha (o GPS de quem para no ponto cai fora do desenho da PA1).
+                const pointZone = !isBusyFor(status, rules) && gpsPosition && (!isProtectedZone(currentZone, rules) || currentZone.id === outsideZoneId)
+                    ? (connection.pointZones ?? []).map(point => ({ point, zone: companyZones.find(zone => normalizeZoneName(zone.name) === normalizeZoneName(point.name)) }))
+                        .find(({ point, zone }) => zone && zone.id !== currentZone.id && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, zone) <= point.radiusMeters)?.zone
+                    : undefined;
+                // Só coloca quem fica perto do ponto por POINT_DWELL_MS (não quem só passa de carro); quem já
+                // foi colocado e a Autocab devolveu volta na hora.
+                if (pointZone) {
+                    const nearSince = this.pointNearSince.get(status.vehicleId);
+                    if (!nearSince || nearSince.zoneId !== pointZone.id)
+                        this.pointNearSince.set(status.vehicleId, { zoneId: pointZone.id, at: Date.now() });
+                    const recentlyPlaced = this.pointPlacements.get(status.vehicleId)?.zoneId === pointZone.id && Date.now() - (this.pointPlacements.get(status.vehicleId)?.at ?? 0) < POINT_PLACEMENT_MEMORY_MS;
+                    if (!recentlyPlaced && Date.now() - (nearSince?.zoneId === pointZone.id ? nearSince.at : Date.now()) < POINT_DWELL_MS) {
+                        waitingForPoint.push(`${vehicle.callsign} (${pointZone.name})`);
+                        continue;
+                    }
+                }
+                else
+                    this.pointNearSince.delete(status.vehicleId);
+                if (pointZone) {
+                    const queueTail = Math.max(calculateQueueTail(snapshot.statuses, pointZone.id), reservedQueuePositions.get(pointZone.id) ?? 0);
+                    // Devolvido pela Autocab há pouco: volta na posição que tinha, não no fim da fila.
+                    const placement = this.pointPlacements.get(status.vehicleId);
+                    const keepPosition = Boolean(placement && placement.zoneId === pointZone.id && Date.now() - placement.at < POINT_PLACEMENT_MEMORY_MS && placement.position <= queueTail + 1);
+                    const position = keepPosition ? placement!.position : queueTail + 1;
+                    reservedQueuePositions.set(pointZone.id, Math.max(queueTail + 1, position));
+                    plannedChanges.push({ ...describeChange(status, currentZone, pointZone, vehicle.callsign, gpsPosition, position, 'point'), keepPosition });
+                    continue;
+                }
                 const followsGps = connection.busyFollowsGps && isBusyFor(status, rules);
                 const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, rules), rules);
                 if (!targetZone)
@@ -251,6 +328,8 @@ export class CorrectionService {
             this.inspectedCount += chunk.length;
             await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
         }
+        if (waitingForPoint.length > 0)
+            this.notes.push(`perto do ponto, aguardando 20 s parado: ${waitingForPoint.join(', ')}`);
         if (keptByTolerance.length > 0)
             this.notes.push(`mantidos na zona pela tolerância de ${this.gpsZoneToleranceMeters} m do GPS: ${keptByTolerance.slice(0, 15).join(', ')}${keptByTolerance.length > 15 ? ` e mais ${keptByTolerance.length - 15}` : ''}`);
         if (busyNotMoved.length > 0)
@@ -290,18 +369,21 @@ export class CorrectionService {
             return;
         }
         const latestStatus = latestStatuses.find(status => status.vehicleId === change.vehicleId);
-        const busyStateChanged = latestStatus ? isBusyFor(latestStatus, this.rulesFor(connection)) !== (change.reason !== 'gps') : true;
+        const busyStateChanged = latestStatus ? isBusyFor(latestStatus, this.rulesFor(connection)) !== (change.reason !== 'gps' && change.reason !== 'point') : true;
         if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
             const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'skipped');
             await this.repository.finishChange(changeId, 'skipped', null, 'Estado do veículo mudou entre planejamento e envio.');
             return;
         }
-        change.position = Math.max(change.position, calculateQueueTail(latestStatuses, change.targetZoneId) + 1, (reservedPositions.get(change.targetZoneId) ?? 0) + 1);
-        reservedPositions.set(change.targetZoneId, change.position);
+        if (!change.keepPosition)
+            change.position = Math.max(change.position, calculateQueueTail(latestStatuses, change.targetZoneId) + 1, (reservedPositions.get(change.targetZoneId) ?? 0) + 1);
+        reservedPositions.set(change.targetZoneId, Math.max(change.position, reservedPositions.get(change.targetZoneId) ?? 0));
         const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, 'pending');
         try {
             const httpStatus = await gateway.applyVehiclePlot(change.vehicleId, change.targetZoneId, change.position);
             sentChanges.push({ change, changeId, httpStatus });
+            if (change.reason === 'point')
+                this.rememberPointPlacement(change);
         }
         catch (error) {
             await this.recordSendFailure(changeId, error);
@@ -415,6 +497,7 @@ export class CorrectionService {
             finally {
                 statusesAfterSend = await this.verifySentChanges(gateway, sentChanges);
             }
+            await this.notifyPointPlacements(connection, cycleId, changes, gateway);
             // Depois dos envios, avisa as filas alteradas pelas próprias correções.
             if (statusesAfterSend)
                 await this.notifyDriverQueues(connection, cycleId, snapshot, statusesAfterSend);

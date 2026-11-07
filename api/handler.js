@@ -142,7 +142,7 @@ import { readFileSync } from "node:fs";
 var MULTICALL_COMPANIES = [
   // Arcoverde avisa por mensagem os motoristas livres de cada zona quando a fila muda. Ocupado vai
   // para FORA DE AREA e só sai quando fica livre (regra padrão, sem busyFollowsGps).
-  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ["5"] },
+  { id: "arcoverde", name: "Arcoverde", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_ARCOVERDE", driverMessages: true, allNotFreeToOutside: true, callsignPrefixes: ["5"], pointZones: [{ name: "PA1", radiusMeters: 80 }] },
   { id: "sao-conrado", name: "S\xE3o Conrado", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_SAO_CONRADO" },
   { id: "pedra-da-gavea", name: "Pedra da G\xE1vea", companyIdEnvironmentVariable: "AUTOCAB_COMPANY_ID_PEDRA_DA_GAVEA" }
 ];
@@ -163,7 +163,7 @@ function readPositiveInteger(value, fallback) {
 }
 function readConnections() {
   if (!process.env.AUTOCAB_CONNECTIONS_FILE)
-    return withPrefixExclusions(MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: "allNotFreeToOutside" in company && company.allNotFreeToOutside === true ? true : void 0, callsignPrefixes: "callsignPrefixes" in company ? company.callsignPrefixes : void 0 })));
+    return withPrefixExclusions(MULTICALL_COMPANIES.map((company) => ({ id: company.id, name: company.name, subscriptionKeyEnvironmentVariable: "AUTOCAB_SUBSCRIPTION_KEY", companyId: readOptionalCompanyId(company.companyIdEnvironmentVariable), companyName: company.name, driverMessages: company.driverMessages, allNotFreeToOutside: "allNotFreeToOutside" in company && company.allNotFreeToOutside === true ? true : void 0, callsignPrefixes: "callsignPrefixes" in company ? company.callsignPrefixes : void 0, pointZones: "pointZones" in company && company.pointZones ? readPointZones(company.pointZones) : void 0 })));
   const connectionList = JSON.parse(readFileSync(process.env.AUTOCAB_CONNECTIONS_FILE, "utf8"));
   if (!Array.isArray(connectionList) || connectionList.length === 0)
     throw new Error("Lista de conex\xF5es vazia ou inv\xE1lida");
@@ -193,6 +193,20 @@ function readConnections() {
     identifiers.add(connection.id);
     return connection;
   }));
+}
+function readPointZones(defaults) {
+  const value = process.env.POINT_ZONES?.trim();
+  if (!value)
+    return defaults;
+  if (value.toLowerCase() === "off")
+    return [];
+  return value.split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+    const [name, radius] = entry.split(":");
+    const radiusMeters = Number(radius ?? 80);
+    if (!name?.trim() || !Number.isFinite(radiusMeters) || radiusMeters <= 0)
+      throw new Error('POINT_ZONES deve ser como "PA1:80,PA2:60"');
+    return { name: name.trim(), radiusMeters };
+  });
 }
 function withPrefixExclusions(connections) {
   return connections.map((connection) => {
@@ -1021,6 +1035,8 @@ async function resolveCompanyId(connection, gateway) {
   return matchingCompanies[0].id;
 }
 var GPS_LOOKUP_CONCURRENCY = 16;
+var POINT_PLACEMENT_MEMORY_MS = 15 * 6e4;
+var POINT_DWELL_MS = 2e4;
 var UNRESOLVED_BLOCK_MS = 12e4;
 var ZONE_LOOKUP_TTL_MS = 12e4;
 var FLEET_CACHE_TTL_MS = 6e4;
@@ -1058,6 +1074,46 @@ var CorrectionService = class {
   }
   zoneLookups = /* @__PURE__ */ new Map();
   busyRequeuedAt = /* @__PURE__ */ new Map();
+  // Posição em que cada carro foi colocado no ponto e quando foi avisado (para não repetir o aviso).
+  pointPlacements = /* @__PURE__ */ new Map();
+  pointNearSince = /* @__PURE__ */ new Map();
+  rememberPointPlacement(change) {
+    const previous = this.pointPlacements.get(change.vehicleId);
+    const samePlacement = previous && previous.zoneId === change.targetZoneId && Date.now() - previous.at < POINT_PLACEMENT_MEMORY_MS;
+    this.pointPlacements.set(change.vehicleId, { zoneId: change.targetZoneId, position: samePlacement ? previous.position : change.position, at: Date.now(), notifiedAt: samePlacement ? previous.notifiedAt : 0 });
+  }
+  // Aviso urgente ao motorista colocado no ponto, uma vez por colocação (não a cada devolução da Autocab).
+  async notifyPointPlacements(connection, cycleId, changes, gateway) {
+    if (!connection.driverMessages || this.driverMessagesMode === "off" || !this.repository.recordDriverMessage)
+      return;
+    const sendForReal = this.driverMessagesMode === "live" && this.mode === "live";
+    for (const change of changes.filter((item) => item.reason === "point")) {
+      if (sendForReal && !this.pointPlacements.has(change.vehicleId))
+        continue;
+      const placement = this.pointPlacements.get(change.vehicleId);
+      if (placement && placement.notifiedAt > 0 && placement.zoneId === change.targetZoneId)
+        continue;
+      if (this.driverMessageRecipients && !this.driverMessageRecipients.includes(change.callsign) && !this.driverMessageRecipients.includes(String(change.vehicleId)))
+        continue;
+      const position = placement?.position ?? change.position;
+      const message = `${(connection.companyName ?? connection.name).toUpperCase()} - Voc\xEA est\xE1 no ${change.targetZoneName}. Voc\xEA \xE9 o ${position}\xBA.`;
+      let outcome = "simulated", httpStatus = null;
+      if (sendForReal) {
+        try {
+          httpStatus = await gateway.sendDriverMessage(change.vehicleId, message);
+          outcome = "sent";
+        } catch (error) {
+          httpStatus = error instanceof AutocabRequestError ? error.httpStatus : null;
+          outcome = "failed";
+        }
+      }
+      if (placement)
+        placement.notifiedAt = Date.now();
+      else
+        this.pointPlacements.set(change.vehicleId, { zoneId: change.targetZoneId, position, at: Date.now(), notifiedAt: Date.now() });
+      await this.repository.recordDriverMessage({ connectionId: connection.id, cycleId, vehicleId: change.vehicleId, callsign: change.callsign, zoneId: change.targetZoneId, zoneName: change.targetZoneName, queuePosition: position, message, mode: this.mode, outcome, httpStatus });
+    }
+  }
   // GPS_ZONE_TOLERANCE_M: metros além do contorno da zona atual antes de o livre ser movido por GPS.
   gpsZoneToleranceMeters = (() => {
     const value = Number(process.env.GPS_ZONE_TOLERANCE_M ?? 150);
@@ -1160,6 +1216,7 @@ var CorrectionService = class {
     const hasOutsideZone = outsideZoneId !== void 0;
     const busyNotMoved = [];
     const keptByTolerance = [];
+    const waitingForPoint = [];
     const gpsByVehicle = new Map(snapshot.gpsPositions.map((position) => [position.vehicleId, position]));
     for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
       if (Date.now() > this.deadline - 15e3) {
@@ -1205,6 +1262,27 @@ var CorrectionService = class {
           continue;
         const { status, vehicle, companyZones, currentZone, gpsPosition, gpsZoneId } = candidate;
         const gpsZone = companyZones.find((zone) => zone.id === gpsZoneId) ?? null;
+        const pointZone = !isBusyFor(status, rules) && gpsPosition && (!isProtectedZone(currentZone, rules) || currentZone.id === outsideZoneId) ? (connection.pointZones ?? []).map((point) => ({ point, zone: companyZones.find((zone) => normalizeZoneName(zone.name) === normalizeZoneName(point.name)) })).find(({ point, zone }) => zone && zone.id !== currentZone.id && distanceToZoneMeters(gpsPosition.latitude, gpsPosition.longitude, zone) <= point.radiusMeters)?.zone : void 0;
+        if (pointZone) {
+          const nearSince = this.pointNearSince.get(status.vehicleId);
+          if (!nearSince || nearSince.zoneId !== pointZone.id)
+            this.pointNearSince.set(status.vehicleId, { zoneId: pointZone.id, at: Date.now() });
+          const recentlyPlaced = this.pointPlacements.get(status.vehicleId)?.zoneId === pointZone.id && Date.now() - (this.pointPlacements.get(status.vehicleId)?.at ?? 0) < POINT_PLACEMENT_MEMORY_MS;
+          if (!recentlyPlaced && Date.now() - (nearSince?.zoneId === pointZone.id ? nearSince.at : Date.now()) < POINT_DWELL_MS) {
+            waitingForPoint.push(`${vehicle.callsign} (${pointZone.name})`);
+            continue;
+          }
+        } else
+          this.pointNearSince.delete(status.vehicleId);
+        if (pointZone) {
+          const queueTail2 = Math.max(calculateQueueTail(snapshot.statuses, pointZone.id), reservedQueuePositions.get(pointZone.id) ?? 0);
+          const placement = this.pointPlacements.get(status.vehicleId);
+          const keepPosition = Boolean(placement && placement.zoneId === pointZone.id && Date.now() - placement.at < POINT_PLACEMENT_MEMORY_MS && placement.position <= queueTail2 + 1);
+          const position = keepPosition ? placement.position : queueTail2 + 1;
+          reservedQueuePositions.set(pointZone.id, Math.max(queueTail2 + 1, position));
+          plannedChanges.push({ ...describeChange(status, currentZone, pointZone, vehicle.callsign, gpsPosition, position, "point"), keepPosition });
+          continue;
+        }
         const followsGps = connection.busyFollowsGps && isBusyFor(status, rules);
         const targetZone = followsGps ? chooseBusyFollowZone(status, currentZone, gpsZone, snapshot.statuses, rules) : chooseTargetZone(status, currentZone, gpsZone, findOutsideZone(companyZones, rules), rules);
         if (!targetZone)
@@ -1225,6 +1303,8 @@ var CorrectionService = class {
       this.inspectedCount += chunk.length;
       await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
     }
+    if (waitingForPoint.length > 0)
+      this.notes.push(`perto do ponto, aguardando 20 s parado: ${waitingForPoint.join(", ")}`);
     if (keptByTolerance.length > 0)
       this.notes.push(`mantidos na zona pela toler\xE2ncia de ${this.gpsZoneToleranceMeters} m do GPS: ${keptByTolerance.slice(0, 15).join(", ")}${keptByTolerance.length > 15 ? ` e mais ${keptByTolerance.length - 15}` : ""}`);
     if (busyNotMoved.length > 0)
@@ -1263,18 +1343,21 @@ var CorrectionService = class {
       return;
     }
     const latestStatus = latestStatuses.find((status) => status.vehicleId === change.vehicleId);
-    const busyStateChanged = latestStatus ? isBusyFor(latestStatus, this.rulesFor(connection)) !== (change.reason !== "gps") : true;
+    const busyStateChanged = latestStatus ? isBusyFor(latestStatus, this.rulesFor(connection)) !== (change.reason !== "gps" && change.reason !== "point") : true;
     if (!latestStatus || latestStatus.hasPenalty || latestStatus.zoneId !== change.previousZoneId || busyStateChanged) {
       const changeId2 = await this.repository.createChange(connection.id, cycleId, this.mode, change, "skipped");
       await this.repository.finishChange(changeId2, "skipped", null, "Estado do ve\xEDculo mudou entre planejamento e envio.");
       return;
     }
-    change.position = Math.max(change.position, calculateQueueTail(latestStatuses, change.targetZoneId) + 1, (reservedPositions.get(change.targetZoneId) ?? 0) + 1);
-    reservedPositions.set(change.targetZoneId, change.position);
+    if (!change.keepPosition)
+      change.position = Math.max(change.position, calculateQueueTail(latestStatuses, change.targetZoneId) + 1, (reservedPositions.get(change.targetZoneId) ?? 0) + 1);
+    reservedPositions.set(change.targetZoneId, Math.max(change.position, reservedPositions.get(change.targetZoneId) ?? 0));
     const changeId = await this.repository.createChange(connection.id, cycleId, this.mode, change, "pending");
     try {
       const httpStatus = await gateway.applyVehiclePlot(change.vehicleId, change.targetZoneId, change.position);
       sentChanges.push({ change, changeId, httpStatus });
+      if (change.reason === "point")
+        this.rememberPointPlacement(change);
     } catch (error) {
       await this.recordSendFailure(changeId, error);
     }
@@ -1381,6 +1464,7 @@ var CorrectionService = class {
       } finally {
         statusesAfterSend = await this.verifySentChanges(gateway, sentChanges);
       }
+      await this.notifyPointPlacements(connection, cycleId, changes, gateway);
       if (statusesAfterSend)
         await this.notifyDriverQueues(connection, cycleId, snapshot, statusesAfterSend);
       if (this.deferred)
@@ -1606,7 +1690,7 @@ async function createNeonRuntime() {
   const connections = configuration.connections.map((connection) => {
     const key = process.env[connection.subscriptionKeyEnvironmentVariable];
     const gateway = configuration.mode === "demo" ? new DemoAutocabClient() : key ? new AutocabClient(configuration.baseUrl, key, fetch, configuration.autocabTimeoutMs, { companiesPath: configuration.companiesPath, driverMessagePath: configuration.driverMessagePath, driverMessageFields: configuration.driverMessageFields }) : null;
-    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, allNotFreeToOutside: connection.allNotFreeToOutside, callsignPrefixes: connection.callsignPrefixes, excludeCallsignPrefixes: connection.excludeCallsignPrefixes, gateway };
+    return { id: connection.id, name: connection.name, companyId: connection.companyId, companyName: connection.companyName, driverMessages: connection.driverMessages, busyFollowsGps: connection.busyFollowsGps, allNotFreeToOutside: connection.allNotFreeToOutside, callsignPrefixes: connection.callsignPrefixes, excludeCallsignPrefixes: connection.excludeCallsignPrefixes, pointZones: connection.pointZones, gateway };
   });
   const service = new CorrectionService(repository, configuration, configuration.mode, configuration.driverMessagesMode, configuration.driverMessageRecipients, configuration.driverMessagesTop, configuration.reservationMessagesMode);
   const runner = new NeonCycleRunner(repository, service, connections);
