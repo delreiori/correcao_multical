@@ -679,7 +679,7 @@ test('PA1: só marca quando entra no desenho da PA1, na hora, com aviso; perto m
     gateway.listVehicleStatuses = async () => structuredClone(statuses);
     gateway.listGpsPositions = async () => [{ vehicleId: 36, ...gps36 }, { vehicleId: 15, latitude: -22.964583, longitude: -43.180404 }, { vehicleId: 4, latitude: -22.964499, longitude: -43.180461 }];
     let lookups = 0;
-    gateway.findZoneByCoordinates = async () => { lookups++; return 35877; };
+    gateway.findZoneByCoordinates = async (latitude: number) => { lookups++; return latitude === -22.965331944444443 ? 37295 : 35877; };
     const plots: [number, number, number][] = [];
     gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => {
         plots.push([vehicleId, zoneId, position]);
@@ -698,7 +698,7 @@ test('PA1: só marca quando entra no desenho da PA1, na hora, com aviso; perto m
     lookups = 0;
     await service.runConnection(connection);
     assert.deepEqual(plots, [[36, 37295, 3]]);
-    assert.equal(lookups, 0, 'zona do GPS pelos contornos');
+    assert.equal(lookups, 1, 'zona do GPS pelos contornos; só a confirmação com a Autocab antes de mover');
     assert.equal(gateway.sentMessages.find(message => message.vehicleId === 36)?.message, 'ARCOVERDE - Você está no PA1. Você é o 3º.');
     // A Autocab devolve para COPACABANA e mais um carro entra na PA1: volta na posição 3, sem novo aviso.
     statuses = [...statuses.map(item => item.vehicleId === 36 ? { ...item, zoneId: 35877, queuePosition: 1 } : item), { vehicleId: 18, zoneId: 37295, queuePosition: 3, status: 'Clear', hasPenalty: false }];
@@ -717,9 +717,28 @@ test('tolerância não segura quem entrou no desenho de outra zona (PA1 colada n
     gateway.listVehicles = async () => [{ id: 3, callsign: '5003', companyId: 7 }];
     gateway.listVehicleStatuses = async () => structuredClone(statuses);
     gateway.listGpsPositions = async () => [{ vehicleId: 3, latitude: -22.9666, longitude: -43.1815 }];
+    gateway.findZoneByCoordinates = async () => 37295;
     gateway.applyVehiclePlot = async (vehicleId: number, zoneId: number, position: number) => { statuses = statuses.map(item => item.vehicleId === vehicleId ? { ...item, zoneId, queuePosition: position } : item); return 200; };
     const repository = new AuditRepository(':memory:');
     await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 7, allNotFreeToOutside: true, gateway });
     assert.equal(statuses[0].zoneId, 37295);
+    repository.close();
+});
+test('não marca errado: se a Autocab não confirma a zona calculada, o livre não é movido', async () => {
+    const gateway = new DemoAutocabClient();
+    const pa1 = { id: 37295, name: 'PA1', companyId: 7, zoneType: 'Normal', boundary: PA1_BOUNDARY };
+    let statuses = [{ vehicleId: 3, zoneId: 35877, queuePosition: 1, status: 'Clear', hasPenalty: false }];
+    gateway.listZones = async () => [pa1, { id: 35877, name: 'COPACABANA', companyId: 7, zoneType: 'Normal' }];
+    gateway.listVehicles = async () => [{ id: 3, callsign: '5003', companyId: 7 }];
+    gateway.listVehicleStatuses = async () => structuredClone(statuses);
+    // Dentro do desenho local da PA1, mas a Autocab (desenho editado no Ghost) diz COPACABANA.
+    gateway.listGpsPositions = async () => [{ vehicleId: 3, latitude: -22.965331944444443, longitude: -43.181255 }];
+    gateway.findZoneByCoordinates = async () => 35877;
+    let plots = 0;
+    gateway.applyVehiclePlot = async () => { plots++; return 200; };
+    const repository = new AuditRepository(':memory:');
+    await new CorrectionService(repository, readConfiguration(), 'live').runConnection({ id: 'arcoverde', name: 'Arcoverde', companyId: 7, allNotFreeToOutside: true, pointZones: [{ name: 'PA1', radiusMeters: 0 }], gateway });
+    assert.equal(plots, 0);
+    assert.match(repository.getDashboard().cycles[0].detail ?? '', /não movidos por a Autocab não confirmar a zona: 5003 \(PA1; Autocab indica COPACABANA\)/);
     repository.close();
 });

@@ -223,6 +223,7 @@ export class CorrectionService {
         const busyNotMoved: string[] = [];
         const keptByTolerance: string[] = [];
         const waitingForPoint: string[] = [];
+        const notConfirmed: string[] = [];
         const gpsByVehicle = new Map(snapshot.gpsPositions.map(position => [position.vehicleId, position]));
         for (let start = 0; start < statusesToInspect.length; start += GPS_LOOKUP_CONCURRENCY) {
             if (Date.now() > this.deadline - 15000) {
@@ -334,6 +335,29 @@ export class CorrectionService {
             this.inspectedCount += chunk.length;
             await this.repository.saveVehicleCursor?.(connection.id, chunk[chunk.length - 1].vehicleId);
         }
+        // Não marcar errado: antes de mover um livre pelo GPS, confirma a zona com a própria Autocab (o
+        // desenho local pode estar desatualizado por até 10 min se a zona foi editada no Ghost).
+        const toConfirm = plannedChanges.filter(change => (change.reason === 'gps' || change.reason === 'point') && change.latitude !== null && change.longitude !== null);
+        if (toConfirm.length > 0) {
+            const rejected = new Set<PlannedChange>();
+            await Promise.all(toConfirm.map(async change => {
+                try {
+                    const autocabZoneId = await gateway.findZoneByCoordinates(change.latitude!, change.longitude!, companyId);
+                    if (autocabZoneId !== change.targetZoneId) {
+                        rejected.add(change);
+                        notConfirmed.push(`${change.callsign} (${change.targetZoneName}; Autocab indica ${snapshot.zones.find(zone => zone.id === autocabZoneId)?.name ?? autocabZoneId ?? 'nenhuma'})`);
+                    }
+                }
+                catch {
+                    rejected.add(change);
+                    notConfirmed.push(`${change.callsign} (sem resposta da Autocab)`);
+                }
+            }));
+            if (rejected.size > 0)
+                plannedChanges.splice(0, plannedChanges.length, ...plannedChanges.filter(change => !rejected.has(change)));
+        }
+        if (notConfirmed.length > 0)
+            this.notes.push(`não movidos por a Autocab não confirmar a zona: ${notConfirmed.slice(0, 15).join(', ')}`);
         if (waitingForPoint.length > 0)
             this.notes.push(`perto do ponto, aguardando 20 s parado: ${waitingForPoint.join(', ')}`);
         if (keptByTolerance.length > 0)

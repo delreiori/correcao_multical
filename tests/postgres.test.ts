@@ -338,7 +338,7 @@ test('passada rápida corrige a zona do carro que se moveu', async () => {
         assert.equal(lookups, 1);
         latitude = -23.0;
         await runner.runPriorityPass();
-        assert.equal(lookups, 2, 'carro que se moveu consulta a zona de novo');
+        assert.equal(lookups, 3, 'carro que se moveu consulta a zona de novo e confirma antes de mover');
         const changes = (await repository.getDashboard()).changes;
         assert.deepEqual(changes.map(change => [change.vehicleId, change.targetZoneName]), [[301, 'Centro']]);
     } finally { await database.close(); }
